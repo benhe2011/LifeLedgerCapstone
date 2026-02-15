@@ -1,6 +1,16 @@
 """Field extraction and storage for structured document data."""
 from typing import Dict, Any
-from datetime import datetime
+from datetime import datetime, date
+
+
+def parse_date(date_str: str) -> date | None:
+    """Parse date string to datetime.date, returns None if invalid."""
+    if not date_str:
+        return None
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
 
 
 async def save_extraction(db, doc_id: int, doc_type: str, fields: Dict[str, Any]) -> int:
@@ -97,7 +107,7 @@ async def get_total_spending(db, user_id: str, start_date: str = None, end_date:
           AND ($2::date IS NULL OR e.date >= $2::date)
           AND ($3::date IS NULL OR e.date <= $3::date)
     """
-    row = await db.fetchrow(sql, user_id, start_date, end_date)
+    row = await db.fetchrow(sql, user_id, parse_date(start_date), parse_date(end_date))
     return {"total": float(row["total"]), "receipt_count": row["count"]}
 
 
@@ -114,7 +124,7 @@ async def get_spending_by_merchant(db, user_id: str, start_date: str = None, end
         ORDER BY total DESC
         LIMIT $4
     """
-    rows = await db.fetch(sql, user_id, start_date, end_date, limit)
+    rows = await db.fetch(sql, user_id, parse_date(start_date), parse_date(end_date), limit)
     return [{"merchant": r["merchant"], "total": float(r["total"]), "count": r["count"]} for r in rows]
 
 
@@ -151,7 +161,7 @@ async def get_receipts_by_date_range(db, user_id: str, start_date: str, end_date
         ORDER BY e.date DESC
         LIMIT $4
     """
-    rows = await db.fetch(sql, user_id, start_date, end_date, limit)
+    rows = await db.fetch(sql, user_id, parse_date(start_date), parse_date(end_date), limit)
     return [
         {
             "id": r["id"],
