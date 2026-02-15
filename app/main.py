@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from app.auth import get_current_user
 from app.s3 import upload_to_s3, generate_presigned_url, download_from_s3
 from app.db import get_db, create_document, search_documents, get_user_documents, get_document_by_id, update_document
-from app.ocr_pipeline import process_image_from_s3
+from app.ocr_pipeline import process_image_from_s3, process_image
 from app.agent import ask_agent
 
 
@@ -155,7 +155,7 @@ async def upload_images(
         content = await file.read()
         s3_key = await upload_to_s3(content, user_id, file.filename)
         doc_id = await create_document(db, user_id, s3_key)
-        background_tasks.add_task(process_image_from_s3, s3_key, str(doc_id), user_id)
+        background_tasks.add_task(process_image, doc_id, s3_key)
         uploaded.append({"doc_id": doc_id, "s3_key": s3_key, "filename": file.filename})
 
     return {"uploaded": uploaded, "count": len(uploaded)}

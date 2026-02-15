@@ -223,12 +223,13 @@ async def update_document_rds(
     logger.info(f"Updated document {row_id} in database")
 
 
-async def process_image(db, doc_id: int, s3_key: str) -> None:
+async def process_image(doc_id: int, s3_key: str) -> None:
     """
     Process an image through the OCR pipeline (direct DB connection version).
     Used when backend handles both upload and DB writes.
+    Acquires its own database connection for use in background tasks.
     """
-    from app.db import update_document
+    from app.db import update_document, init_db
     from app.extraction import save_extraction
 
     # Download image from S3
@@ -237,15 +238,18 @@ async def process_image(db, doc_id: int, s3_key: str) -> None:
     # Run OCR pipeline
     result = await run_ocr_pipeline(image_bytes)
 
-    # Update document in database
-    await update_document(
-        db,
-        doc_id,
-        doc_text=result["doc_text"],
-        doc_type=result["doc_type"],
-        ocr_blocks=result["ocr_blocks"],
-    )
+    # Get database connection and update
+    pool = await init_db()
+    async with pool.acquire() as db:
+        # Update document in database
+        await update_document(
+            db,
+            doc_id,
+            doc_text=result["doc_text"],
+            doc_type=result["doc_type"],
+            ocr_blocks=result["ocr_blocks"],
+        )
 
-    # Save extraction if present
-    if result["extraction"]:
-        await save_extraction(db, doc_id, result["doc_type"], result["extraction"])
+        # Save extraction if present
+        if result["extraction"]:
+            await save_extraction(db, doc_id, result["doc_type"], result["extraction"])
