@@ -22,20 +22,20 @@ docker-compose down
 docker-compose up --build -d
 
 # Watch logs to verify startup
-docker logs -f lifeledgercapstone-app-1
+docker logs -f lifeledgercapstone_app_1
 ```
 
 ## Checking Logs
 
 ```bash
 # View recent logs
-docker logs lifeledgercapstone-app-1
+docker logs lifeledgercapstone_app_1
 
 # Follow logs in real-time
-docker logs -f lifeledgercapstone-app-1
+docker logs -f lifeledgercapstone_app_1
 
 # View last 100 lines
-docker logs --tail 100 lifeledgercapstone-app-1
+docker logs --tail 100 lifeledgercapstone_app_1
 ```
 
 ## API Endpoints
@@ -109,7 +109,7 @@ Edit `.env` on EC2 (`nano .env`) - key variables:
 
 **Container won't start:**
 ```bash
-docker logs lifeledgercapstone-app-1
+docker logs lifeledgercapstone_app_1
 ```
 
 **Database connection issues:**
