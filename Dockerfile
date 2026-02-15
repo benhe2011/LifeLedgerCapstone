@@ -10,7 +10,12 @@ RUN apt-get update && apt-get install -y \
     libxext6 \
     libxrender-dev \
     libgomp1 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
+
+# Download AWS RDS CA bundle for SSL connections to Aurora
+RUN mkdir -p /certs && \
+    curl -o /certs/global-bundle.pem https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
 
 # Copy requirements first for caching
 COPY requirements.txt .

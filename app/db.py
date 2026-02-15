@@ -1,5 +1,6 @@
 """PostgreSQL database operations with pgvector support."""
 import os
+import ssl
 import json
 from typing import List, Dict, Any
 from contextlib import asynccontextmanager
@@ -23,6 +24,14 @@ def get_embedding_model() -> SentenceTransformer:
     return _embedding_model
 
 
+def get_ssl_context():
+    """Create SSL context for Aurora connection."""
+    ssl_context = ssl.create_default_context(cafile="/certs/global-bundle.pem")
+    ssl_context.check_hostname = True
+    ssl_context.verify_mode = ssl.CERT_REQUIRED
+    return ssl_context
+
+
 async def init_db() -> asyncpg.Pool:
     """Initialize database connection pool."""
     global _pool
@@ -31,6 +40,7 @@ async def init_db() -> asyncpg.Pool:
             os.getenv("DATABASE_URL"),
             min_size=2,
             max_size=10,
+            ssl=get_ssl_context(),
         )
     return _pool
 
