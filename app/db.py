@@ -126,7 +126,7 @@ async def update_document(
         SET doc_text = $2,
             doc_type = $3,
             ocr_blocks = $4,
-            text_vector = $5
+            text_vector = $5::vector
         WHERE id = $1
     """
     await conn.execute(
@@ -135,7 +135,7 @@ async def update_document(
         doc_text,
         doc_type,
         json.dumps(ocr_blocks),
-        embedding,
+        str(embedding),
     )
 
 
@@ -152,13 +152,13 @@ async def search_documents(
 
     sql = """
         SELECT id, s3_key, doc_type, doc_text, created_at,
-               1 - (text_vector <=> $3) as similarity
+               1 - (text_vector <=> $3::vector) as similarity
         FROM documents
         WHERE user_id = $1 AND text_vector IS NOT NULL
-        ORDER BY text_vector <=> $3
+        ORDER BY text_vector <=> $3::vector
         LIMIT $2
     """
-    rows = await conn.fetch(sql, user_id, limit, query_embedding)
+    rows = await conn.fetch(sql, user_id, limit, str(query_embedding))
 
     return [
         {
