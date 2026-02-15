@@ -1,152 +1,188 @@
-"""LangGraph agent with tools for document analysis."""
-from typing import Dict, Any, List, TypedDict, Annotated
-import operator
+"""VLM-driven agent with tool calling for document analysis."""
+import json
+import os
+from typing import Dict, Any, List
+from datetime import date
 
-from langgraph.graph import StateGraph, END
-from langgraph.prebuilt import ToolExecutor
+from openai import AsyncAzureOpenAI
 
-from app.db import search_documents, get_document_by_id
-from app.extraction import get_user_receipts
-from app.vlm_client import ask_vlm
-
-
-class AgentState(TypedDict):
-    """State for the agent graph."""
-    question: str
-    user_id: str
-    db: Any
-    messages: Annotated[List[Dict], operator.add]
-    answer: str
-    sources: List[int]
+from app.db import search_documents
+from app.extraction import (
+    get_total_spending,
+    get_spending_by_merchant,
+    get_receipts_by_merchant,
+    get_receipts_by_date_range,
+)
 
 
-# Tool definitions
-async def search_docs_tool(state: AgentState) -> Dict[str, Any]:
-    """Search user documents."""
-    results = await search_documents(
-        state["db"],
-        state["user_id"],
-        state["question"],
-        limit=5,
-    )
-    return {
-        "results": results,
-        "doc_ids": [r["id"] for r in results],
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_documents",
+            "description": "Search documents by text/semantic similarity. Use for general questions about document content.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query text"}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_total_spending",
+            "description": "Get total spending amount. Use for 'how much did I spend' questions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_date": {"type": "string", "description": "Start date YYYY-MM-DD"},
+                    "end_date": {"type": "string", "description": "End date YYYY-MM-DD"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_spending_by_merchant",
+            "description": "Get spending broken down by merchant/store. Use for 'where do I spend the most' questions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_date": {"type": "string", "description": "Start date YYYY-MM-DD"},
+                    "end_date": {"type": "string", "description": "End date YYYY-MM-DD"},
+                    "limit": {"type": "integer", "description": "Max merchants to return", "default": 10}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_receipts_by_merchant",
+            "description": "Get all receipts from a specific merchant. Use for 'show me Target receipts' type questions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "merchant": {"type": "string", "description": "Merchant name (partial match)"},
+                    "limit": {"type": "integer", "description": "Max receipts to return", "default": 20}
+                },
+                "required": ["merchant"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_receipts_by_date_range",
+            "description": "Get all receipts in a date range. Use for 'receipts from last month' type questions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_date": {"type": "string", "description": "Start date YYYY-MM-DD"},
+                    "end_date": {"type": "string", "description": "End date YYYY-MM-DD"},
+                    "limit": {"type": "integer", "description": "Max receipts to return", "default": 50}
+                },
+                "required": ["start_date", "end_date"]
+            }
+        }
     }
+]
 
 
-async def query_receipts_tool(state: AgentState) -> Dict[str, Any]:
-    """Query receipt extractions."""
-    receipts = await get_user_receipts(state["db"], state["user_id"])
-    return {"receipts": receipts}
+SYSTEM_PROMPT = """You are a helpful assistant that analyzes the user's documents and receipts.
+You have access to tools to search documents, query spending data, and retrieve receipt details.
+
+When answering questions:
+1. Use the appropriate tool(s) to get data
+2. Analyze the results and provide a clear, helpful answer
+3. Include specific numbers, dates, and merchant names when relevant
+4. If asked about spending, always include the total amount
+
+Today's date is {today}. Use this to interpret relative dates like "last month" or "this year"."""
 
 
-async def analyze_with_vlm(state: AgentState, context: str) -> str:
-    """Use VLM to analyze and answer the question."""
-    return await ask_vlm(None, state["question"], context)
+async def execute_tool(db, user_id: str, tool_call) -> str:
+    """Execute a tool call and return JSON result."""
+    name = tool_call.function.name
+    args = json.loads(tool_call.function.arguments)
 
-
-# Graph nodes
-async def search_node(state: AgentState) -> Dict[str, Any]:
-    """Search for relevant documents."""
-    results = await search_documents(
-        state["db"],
-        state["user_id"],
-        state["question"],
-        limit=5,
-    )
-
-    context_parts = []
-    doc_ids = []
-
-    for doc in results:
-        if doc.get("doc_text"):
-            context_parts.append(f"Document {doc['id']} ({doc['doc_type']}):\n{doc['doc_text'][:500]}")
-            doc_ids.append(doc["id"])
-
-    return {
-        "messages": [{"role": "system", "content": f"Found {len(results)} relevant documents"}],
-        "sources": doc_ids,
-        "_context": "\n\n".join(context_parts),
-    }
-
-
-async def reason_node(state: AgentState) -> Dict[str, Any]:
-    """Reason about the question using VLM."""
-    context = state.get("_context", "")
-
-    if not context:
-        answer = "I couldn't find any relevant documents to answer your question."
+    if name == "search_documents":
+        result = await search_documents(db, user_id, args["query"], limit=5)
+    elif name == "get_total_spending":
+        result = await get_total_spending(db, user_id, args.get("start_date"), args.get("end_date"))
+    elif name == "get_spending_by_merchant":
+        result = await get_spending_by_merchant(db, user_id, args.get("start_date"), args.get("end_date"), args.get("limit", 10))
+    elif name == "get_receipts_by_merchant":
+        result = await get_receipts_by_merchant(db, user_id, args["merchant"], args.get("limit", 20))
+    elif name == "get_receipts_by_date_range":
+        result = await get_receipts_by_date_range(db, user_id, args["start_date"], args["end_date"], args.get("limit", 50))
     else:
-        answer = await ask_vlm(None, state["question"], context)
+        result = {"error": f"Unknown tool: {name}"}
 
-    return {
-        "answer": answer,
-        "messages": [{"role": "assistant", "content": answer}],
-    }
-
-
-def should_continue(state: AgentState) -> str:
-    """Determine if we should continue to reasoning."""
-    if state.get("sources"):
-        return "reason"
-    return "end"
-
-
-# Build the graph
-def create_agent_graph():
-    """Create the LangGraph agent."""
-    workflow = StateGraph(AgentState)
-
-    # Add nodes
-    workflow.add_node("search", search_node)
-    workflow.add_node("reason", reason_node)
-
-    # Set entry point
-    workflow.set_entry_point("search")
-
-    # Add edges
-    workflow.add_conditional_edges(
-        "search",
-        should_continue,
-        {
-            "reason": "reason",
-            "end": END,
-        },
-    )
-    workflow.add_edge("reason", END)
-
-    return workflow.compile()
-
-
-# Cached agent
-_agent = None
-
-
-def get_agent():
-    """Get or create the agent."""
-    global _agent
-    if _agent is None:
-        _agent = create_agent_graph()
-    return _agent
+    return json.dumps(result)
 
 
 async def ask_agent(db, user_id: str, question: str) -> Dict[str, Any]:
-    """Ask the agent a question."""
-    agent = get_agent()
+    """VLM-driven agent with tool calling."""
+    client = AsyncAzureOpenAI(
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+        api_key=os.getenv("AZURE_OPENAI_KEY"),
+        api_version="2024-02-15-preview",
+    )
+    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1")
 
-    initial_state = {
-        "question": question,
-        "user_id": user_id,
-        "db": db,
-        "messages": [],
-        "answer": "",
-        "sources": [],
-    }
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT.format(today=date.today().isoformat())},
+        {"role": "user", "content": question}
+    ]
 
-    result = await agent.ainvoke(initial_state)
+    sources = []
 
+    # Loop: VLM calls tools until it produces final answer
+    for _ in range(5):  # Max 5 iterations to prevent infinite loops
+        response = await client.chat.completions.create(
+            model=deployment,
+            messages=messages,
+            tools=TOOLS,
+            tool_choice="auto"
+        )
+
+        msg = response.choices[0].message
+        messages.append(msg)  # Add assistant message to history
+
+        if msg.tool_calls:
+            # Execute each tool call
+            for tool_call in msg.tool_calls:
+                result = await execute_tool(db, user_id, tool_call)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": result
+                })
+                # Track doc_ids as sources
+                try:
+                    data = json.loads(result)
+                    if isinstance(data, list):
+                        for item in data:
+                            if "doc_id" in item:
+                                sources.append(item["doc_id"])
+                            elif "id" in item:
+                                sources.append(item["id"])
+                except:
+                    pass
+        else:
+            # No more tool calls - this is the final answer
+            return {
+                "answer": msg.content or "I couldn't find relevant information.",
+                "sources": list(set(sources))  # Dedupe
+            }
+
+    # Max iterations reached
     return {
-        "answer": result.get("answer", "Unable to process your question."),
-        "sources": result.get("sources", []),
+        "answer": "I wasn't able to complete the analysis. Please try a simpler question.",
+        "sources": list(set(sources))
     }
