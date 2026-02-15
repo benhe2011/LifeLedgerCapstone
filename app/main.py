@@ -155,7 +155,6 @@ async def upload_images(
         content = await file.read()
         s3_key = await upload_to_s3(content, user_id, file.filename)
         doc_id = await create_document(db, user_id, s3_key)
-        background_tasks.add_task(process_image, doc_id, s3_key)
         uploaded.append({"doc_id": doc_id, "s3_key": s3_key, "filename": file.filename})
 
     return {"uploaded": uploaded, "count": len(uploaded)}
