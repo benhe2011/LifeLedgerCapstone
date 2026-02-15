@@ -13,7 +13,7 @@ After pushing changes to GitHub:
 
 ```bash
 # SSH into EC2
-ssh -i lifeledger-key.pem ubuntu@18.236.74.130
+ssh -i LLKey.pem ubuntu@18.236.74.130
 
 # Pull latest code and rebuild
 cd LifeLedgerCapstone
@@ -123,3 +123,4 @@ docker logs lifeledgercapstone-app-1
 ## Team
 
 UC Berkeley MIDS Capstone - Spring 2025
+Benjamin He, Daniel Wang, Jiayi Ding, Viola Qiu, Umesh Kant
