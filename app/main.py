@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from app.auth import get_current_user
 from app.s3 import upload_to_s3, generate_presigned_url, download_from_s3
 from app.db import get_db, create_document, search_documents, get_user_documents, get_document_by_id, update_document
-from app.ocr_pipeline import process_image_from_s3, process_image
+from app.ocr_pipeline import process_image
 from app.agent import ask_agent
 
 
@@ -124,12 +124,12 @@ async def process_document(
     4. Frontend calls this endpoint to trigger OCR processing
     """
     # Add OCR processing to background tasks
-    background_tasks.add_task(
-        process_image_from_s3,
-        s3_key=request.s3_key,
-        row_id=request.row_id,
-        user_id=user_id,
-    )
+    if request.row_id:
+        background_tasks.add_task(
+            process_image,
+            int(request.row_id),
+            request.s3_key,
+        )
 
     return ProcessResponse(
         status="processing",

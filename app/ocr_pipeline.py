@@ -1,13 +1,11 @@
 """OCR pipeline using PaddleOCR with document classification.
 
-Supports two flows:
-1. Direct upload: process_image() - when backend handles upload
-2. Frontend upload: process_image_from_s3() - when frontend uploads to S3 directly
+Usage: Call process_image(doc_id, s3_key) to run OCR on an uploaded image.
 """
 import io
 import os
 import logging
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 
 from PIL import Image
 from paddleocr import PaddleOCR
@@ -93,52 +91,6 @@ def extract_text_and_boxes(ocr_result: List) -> tuple[str, List[Dict[str, Any]]]
     return " ".join(texts), boxes
 
 
-async def process_image_from_s3(
-    s3_key: str,
-    row_id: Optional[str] = None,
-    user_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Process an image from S3 through the OCR pipeline.
-
-    This is called after frontend uploads to S3 and confirms in its DB.
-    Updates the document record via RDS Data API (same as frontend uses).
-
-    Args:
-        s3_key: S3 key of the uploaded image
-        row_id: Frontend's document ID (row_id in documents table)
-        user_id: User ID for logging/verification
-
-    Returns:
-        Dict with processing results
-    """
-    try:
-        logger.info(f"Processing image: {s3_key}")
-
-        # Download image from S3
-        image_bytes = await download_from_s3(s3_key)
-
-        # Run OCR and get results
-        result = await run_ocr_pipeline(image_bytes)
-
-        # Update document in database via RDS Data API
-        if row_id:
-            await update_document_rds(
-                row_id=row_id,
-                doc_text=result["doc_text"],
-                doc_type=result["doc_type"],
-                ocr_blocks=result["ocr_blocks"],
-            )
-
-        logger.info(f"Processed {s3_key}: type={result['doc_type']}, confidence={result['confidence']:.2f}")
-
-        return result
-
-    except Exception as e:
-        logger.error(f"Error processing {s3_key}: {e}")
-        raise
-
-
 async def run_ocr_pipeline(image_bytes: bytes) -> Dict[str, Any]:
     """Run OCR pipeline on image bytes and return results."""
     # Run PaddleOCR
@@ -174,53 +126,6 @@ async def run_ocr_pipeline(image_bytes: bytes) -> Dict[str, Any]:
         "confidence": confidence,
         "extraction": extraction,
     }
-
-
-async def update_document_rds(
-    row_id: str,
-    doc_text: str,
-    doc_type: str,
-    ocr_blocks: List[Dict[str, Any]],
-) -> None:
-    """Update document in Aurora via RDS Data API (matches frontend pattern)."""
-    import json
-    import boto3
-
-    rds_client = boto3.client(
-        "rds-data",
-        region_name=os.getenv("AWS_REGION", "us-west-2"),
-    )
-
-    cluster_arn = os.getenv("AWS_RDS_CLUSTER_ARN")
-    secret_arn = os.getenv("AWS_RDS_SECRET_ARN")
-    database = os.getenv("AWS_RDS_DATABASE")
-
-    if not all([cluster_arn, secret_arn, database]):
-        logger.warning("RDS Data API not configured, skipping DB update")
-        return
-
-    sql = """
-        UPDATE documents
-        SET doc_text = :docText,
-            doc_type = :docType,
-            ocr_blocks = :ocrBlocks
-        WHERE row_id = :rowId
-    """
-
-    rds_client.execute_statement(
-        resourceArn=cluster_arn,
-        secretArn=secret_arn,
-        database=database,
-        sql=sql,
-        parameters=[
-            {"name": "docText", "value": {"stringValue": doc_text}},
-            {"name": "docType", "value": {"stringValue": doc_type}},
-            {"name": "ocrBlocks", "value": {"stringValue": json.dumps(ocr_blocks)}},
-            {"name": "rowId", "value": {"stringValue": row_id}},
-        ],
-    )
-
-    logger.info(f"Updated document {row_id} in database")
 
 
 async def process_image(doc_id: int, s3_key: str) -> None:
