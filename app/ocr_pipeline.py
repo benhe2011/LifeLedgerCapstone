@@ -2,6 +2,7 @@
 
 Usage: Call process_image(doc_id, s3_key) to run OCR on an uploaded image.
 """
+import asyncio
 import io
 import os
 import logging
@@ -15,6 +16,12 @@ from app.vlm_client import refine_ocr_with_vlm, extract_receipt_fields
 
 
 logger = logging.getLogger(__name__)
+
+# Limit concurrent OCR processing - configurable for different instance sizes
+# t3.large (8GB): 2, t3.xlarge (16GB): 4, t3.2xlarge (32GB): 6-8
+MAX_CONCURRENT_OCR = int(os.getenv("MAX_CONCURRENT_OCR", "2"))
+_processing_semaphore = asyncio.Semaphore(MAX_CONCURRENT_OCR)
+logger.info(f"OCR concurrency limit set to {MAX_CONCURRENT_OCR}")
 
 # Lazy-load OCR model
 _ocr_model = None
@@ -130,10 +137,16 @@ async def run_ocr_pipeline(image_bytes: bytes) -> Dict[str, Any]:
 
 async def process_image(doc_id: int, s3_key: str) -> None:
     """
-    Process an image through the OCR pipeline (direct DB connection version).
-    Used when backend handles both upload and DB writes.
-    Acquires its own database connection for use in background tasks.
+    Process an image through the OCR pipeline.
+    Uses semaphore to limit concurrent processing (configurable via MAX_CONCURRENT_OCR).
     """
+    async with _processing_semaphore:
+        logger.info(f"Processing doc_id={doc_id}, s3_key={s3_key}")
+        await _process_image_internal(doc_id, s3_key)
+
+
+async def _process_image_internal(doc_id: int, s3_key: str) -> None:
+    """Internal processing logic."""
     from app.db import update_document, init_db
     from app.extraction import save_extraction
 
@@ -158,3 +171,5 @@ async def process_image(doc_id: int, s3_key: str) -> None:
         # Save extraction if present
         if result["extraction"]:
             await save_extraction(db, doc_id, result["doc_type"], result["extraction"])
+
+    logger.info(f"Completed processing doc_id={doc_id}")

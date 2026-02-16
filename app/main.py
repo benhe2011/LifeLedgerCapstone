@@ -46,10 +46,18 @@ app.add_middleware(
 
 
 # Request/Response models
-class ProcessRequest(BaseModel):
-    """Request to process a document that was uploaded via frontend."""
+class ProcessItem(BaseModel):
+    """Single item for processing."""
     s3_key: str
-    row_id: Optional[str] = None  # Frontend's document ID
+    row_id: str
+
+
+class ProcessRequest(BaseModel):
+    """Request to process documents uploaded via frontend."""
+    items: Optional[List[ProcessItem]] = None  # List for multi-item support
+    # Backwards compatible: also accept single item
+    s3_key: Optional[str] = None
+    row_id: Optional[str] = None
 
 
 class ProcessResponse(BaseModel):
@@ -101,6 +109,13 @@ class AskResponse(BaseModel):
     sources: List[str]  # Document IDs
 
 
+class UploadAndProcessResponse(BaseModel):
+    """Response for combined upload and process endpoint."""
+    uploaded: List[Dict[str, Any]]
+    count: int
+    message: str
+
+
 # Endpoints
 @app.get("/health")
 async def health_check():
@@ -115,26 +130,30 @@ async def process_document(
     user_id: str = Depends(get_current_user),
 ):
     """
-    Trigger OCR processing for a document uploaded via frontend.
-
-    Frontend flow:
-    1. Frontend gets presigned URL from its API
-    2. Frontend uploads directly to S3
-    3. Frontend confirms upload to its API (writes to DB)
-    4. Frontend calls this endpoint to trigger OCR processing
+    Trigger OCR processing for documents uploaded via frontend.
+    Supports single item (s3_key/row_id) or multiple items (items list).
     """
-    # Add OCR processing to background tasks
-    if request.row_id:
+    items_to_process = []
+
+    # Handle new multi-item format
+    if request.items:
+        items_to_process = [{"s3_key": item.s3_key, "row_id": item.row_id} for item in request.items]
+    # Handle legacy single-item format
+    elif request.s3_key and request.row_id:
+        items_to_process = [{"s3_key": request.s3_key, "row_id": request.row_id}]
+
+    # Queue background processing for each item
+    for item in items_to_process:
         background_tasks.add_task(
             process_image,
-            int(request.row_id),
-            request.s3_key,
+            int(item["row_id"]),
+            item["s3_key"],
         )
 
     return ProcessResponse(
         status="processing",
-        s3_key=request.s3_key,
-        message="OCR processing started in background",
+        s3_key=items_to_process[0]["s3_key"] if items_to_process else "",
+        message=f"OCR processing started for {len(items_to_process)} document(s)",
     )
 
 
@@ -158,6 +177,45 @@ async def upload_images(
         uploaded.append({"doc_id": doc_id, "s3_key": s3_key, "filename": file.filename})
 
     return {"uploaded": uploaded, "count": len(uploaded)}
+
+
+@app.post("/uploadAndProcess", response_model=UploadAndProcessResponse)
+async def upload_and_process(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(...),
+    user_id: str = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """
+    Upload images and immediately start OCR processing.
+    Combines /upload and /process into a single call.
+    Supports multiple files with safe concurrency (configurable via MAX_CONCURRENT_OCR).
+    """
+    uploaded = []
+
+    for file in files:
+        # Upload to S3
+        content = await file.read()
+        s3_key = await upload_to_s3(content, user_id, file.filename)
+
+        # Create DB record
+        doc_id = await create_document(db, user_id, s3_key)
+
+        # Queue background processing (semaphore in process_image limits concurrency)
+        background_tasks.add_task(process_image, doc_id, s3_key)
+
+        uploaded.append({
+            "doc_id": doc_id,
+            "s3_key": s3_key,
+            "filename": file.filename,
+            "status": "processing"
+        })
+
+    return UploadAndProcessResponse(
+        uploaded=uploaded,
+        count=len(uploaded),
+        message=f"Uploaded and started processing {len(uploaded)} file(s)"
+    )
 
 
 @app.post("/search", response_model=SearchResult)
