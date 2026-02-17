@@ -81,3 +81,30 @@ async def delete_from_s3(s3_key: str) -> bool:
         return True
     except ClientError:
         return False
+
+
+async def delete_many_from_s3(s3_keys: list[str]) -> dict:
+    """Delete multiple files from S3 in a single batch operation.
+
+    Returns dict with 'deleted' and 'errors' counts.
+    """
+    if not s3_keys:
+        return {"deleted": 0, "errors": 0}
+
+    s3 = get_s3_client()
+    bucket = get_bucket_name()
+
+    try:
+        # S3 delete_objects accepts up to 1000 keys per request
+        objects = [{"Key": key} for key in s3_keys]
+        response = s3.delete_objects(
+            Bucket=bucket,
+            Delete={"Objects": objects, "Quiet": False}
+        )
+
+        deleted_count = len(response.get("Deleted", []))
+        error_count = len(response.get("Errors", []))
+
+        return {"deleted": deleted_count, "errors": error_count}
+    except ClientError:
+        return {"deleted": 0, "errors": len(s3_keys)}

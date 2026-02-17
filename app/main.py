@@ -14,8 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from app.auth import get_current_user
-from app.s3 import upload_to_s3, generate_presigned_url, download_from_s3
-from app.db import get_db, create_document, search_documents, get_user_documents, get_document_by_id, update_document
+from app.s3 import upload_to_s3, generate_presigned_url, download_from_s3, delete_many_from_s3
+from app.db import get_db, create_document, search_documents, get_user_documents, get_document_by_id, update_document, delete_documents
 from app.ocr_pipeline import process_image
 from app.agent import ask_agent
 
@@ -74,6 +74,10 @@ class SearchRequest(BaseModel):
 
 class AskRequest(BaseModel):
     question: str
+
+
+class DeleteRequest(BaseModel):
+    document_ids: List[int]
 
 
 class LineItem(BaseModel):
@@ -307,6 +311,36 @@ async def get_document(
         "totalValue": _extract_total_value(doc),
         "ocr_blocks": doc.get("ocr_blocks", []),
         "doc_text": doc.get("doc_text"),
+    }
+
+
+@app.delete("/documents")
+async def delete_documents_endpoint(
+    request: DeleteRequest,
+    user_id: str = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Delete multiple documents and their associated S3 objects.
+
+    Only deletes documents owned by the authenticated user.
+    """
+    if not request.document_ids:
+        raise HTTPException(status_code=400, detail="No document IDs provided")
+
+    # Delete from database and get S3 keys
+    s3_keys = await delete_documents(db, request.document_ids, user_id)
+
+    if not s3_keys:
+        raise HTTPException(status_code=404, detail="No documents found to delete")
+
+    # Delete from S3
+    s3_result = await delete_many_from_s3(s3_keys)
+
+    return {
+        "deleted_count": len(s3_keys),
+        "s3_deleted": s3_result["deleted"],
+        "s3_errors": s3_result["errors"],
+        "message": f"Deleted {len(s3_keys)} document(s)",
     }
 
 

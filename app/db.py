@@ -221,3 +221,46 @@ async def get_document_by_id(conn, doc_id: int, user_id: str) -> Dict[str, Any] 
         "ocr_blocks": json.loads(row["ocr_blocks"]) if row["ocr_blocks"] else [],
         "created_at": row["created_at"].isoformat(),
     }
+
+
+async def delete_documents(
+    conn,
+    doc_ids: List[int],
+    user_id: str,
+) -> List[str]:
+    """Delete documents and their extractions, returning S3 keys for cleanup.
+
+    Returns list of s3_keys that need to be deleted from S3.
+    Only deletes documents owned by the specified user_id.
+    """
+    if not doc_ids:
+        return []
+
+    # First, get the s3_keys for documents owned by this user
+    query = """
+        SELECT id, s3_key FROM documents
+        WHERE id = ANY($1::int[]) AND user_id = $2
+    """
+    rows = await conn.fetch(query, doc_ids, user_id)
+
+    if not rows:
+        return []
+
+    # Get the actual IDs that belong to this user (security check)
+    valid_ids = [row["id"] for row in rows]
+    s3_keys = [row["s3_key"] for row in rows]
+
+    # Delete extractions first (child table with FK constraint)
+    await conn.execute(
+        "DELETE FROM extractions WHERE doc_id = ANY($1::int[])",
+        valid_ids
+    )
+
+    # Delete documents
+    await conn.execute(
+        "DELETE FROM documents WHERE id = ANY($1::int[]) AND user_id = $2",
+        valid_ids,
+        user_id
+    )
+
+    return s3_keys
