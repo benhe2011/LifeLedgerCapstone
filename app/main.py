@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from app.auth import get_current_user
 from app.s3 import upload_to_s3, generate_presigned_url, download_from_s3, delete_many_from_s3
-from app.db import get_db, create_document, search_documents, get_user_documents, get_document_by_id, update_document, delete_documents
+from app.db import get_db, create_document, search_documents, get_user_documents, get_document_by_id, update_document, delete_documents, get_upcoming_events
 from app.ocr_pipeline import process_image
 from app.agent import ask_agent
 
@@ -246,7 +246,7 @@ async def search(
             id=str(doc["id"]),
             type=_normalize_doc_type(doc.get("doc_type", "unknown")),
             fileUrl=file_url,
-            status="Done" if doc.get("doc_text") else "Processing",
+            status=_get_status(doc),
             primaryEntity=_extract_primary_entity(doc),
             secondaryEntity=None,
             primaryDate=doc.get("created_at", "")[:10],
@@ -274,13 +274,15 @@ async def list_documents(
     frontend_docs = []
     for doc in docs:
         file_url = await generate_presigned_url(doc["s3_key"])
+        # Use extracted date if available, otherwise fall back to created_at
+        primary_date = doc.get("extracted_date") or doc.get("created_at", "")[:10]
         frontend_docs.append({
             "id": str(doc["id"]),
             "type": _normalize_doc_type(doc.get("doc_type", "unknown")),
             "fileUrl": file_url,
-            "status": "Done" if doc.get("doc_text") else "Processing",
+            "status": _get_status(doc),
             "primaryEntity": _extract_primary_entity(doc),
-            "primaryDate": doc.get("created_at", "")[:10],
+            "primaryDate": primary_date,
             "totalValue": _extract_total_value(doc),
         })
 
@@ -305,7 +307,7 @@ async def get_document(
         "id": str(doc["id"]),
         "type": _normalize_doc_type(doc.get("doc_type", "unknown")),
         "fileUrl": file_url,
-        "status": "Done" if doc.get("doc_text") else "Processing",
+        "status": _get_status(doc),
         "primaryEntity": _extract_primary_entity(doc),
         "primaryDate": doc.get("created_at", "")[:10],
         "totalValue": _extract_total_value(doc),
@@ -348,10 +350,24 @@ async def delete_documents_endpoint(
 async def get_radar(
     user_id: str = Depends(get_current_user),
     db=Depends(get_db),
+    days: int = 30,
 ):
-    """Get upcoming deadlines from user documents."""
-    # TODO: Implement deadline extraction and radar
-    return {"deadlines": [], "message": "Radar feature coming soon"}
+    """Get upcoming events/deadlines from user documents within the next N days."""
+    events = await get_upcoming_events(db, user_id, days_ahead=days)
+
+    radar_items = []
+    for event in events:
+        file_url = await generate_presigned_url(event["s3_key"])
+        radar_items.append({
+            "id": str(event["id"]),
+            "type": _normalize_doc_type(event.get("doc_type", "unknown")),
+            "fileUrl": file_url,
+            "primaryEntity": event.get("merchant") or "Unknown",
+            "date": event.get("date"),
+            "totalValue": f"${event['total_amount']:.2f}" if event.get("total_amount") else "",
+        })
+
+    return {"events": radar_items, "count": len(radar_items)}
 
 
 @app.post("/ask", response_model=AskResponse)
@@ -366,6 +382,16 @@ async def ask_question(
 
 
 # Helper functions for frontend format conversion
+def _get_status(doc: dict) -> str:
+    """Determine document status from doc_text."""
+    text = doc.get("doc_text", "")
+    if not text:
+        return "Processing"
+    if text == "[Processing failed]":
+        return "Needs Review"
+    return "Done"
+
+
 def _normalize_doc_type(doc_type: str) -> str:
     """Convert internal doc_type to frontend format."""
     mapping = {
@@ -390,10 +416,13 @@ def _extract_primary_entity(doc: dict) -> str:
     # Fall back to first line of OCR text
     text = doc.get("doc_text", "")
     if text:
+        # Handle failed processing
+        if text == "[Processing failed]":
+            return "Processing Failed"
         first_line = text.split("\n")[0].strip()
         return first_line[:50] if first_line else "Unknown Document"
 
-    return "Unknown Document"
+    return "Processing..."
 
 
 def _extract_total_value(doc: dict) -> str:

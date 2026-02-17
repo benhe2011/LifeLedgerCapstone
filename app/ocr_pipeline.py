@@ -150,26 +150,43 @@ async def _process_image_internal(doc_id: int, s3_key: str) -> None:
     from app.db import update_document, init_db
     from app.extraction import save_extraction
 
-    # Download image from S3
-    image_bytes = await download_from_s3(s3_key)
+    try:
+        # Download image from S3
+        image_bytes = await download_from_s3(s3_key)
 
-    # Run OCR pipeline
-    result = await run_ocr_pipeline(image_bytes)
+        # Run OCR pipeline
+        result = await run_ocr_pipeline(image_bytes)
 
-    # Get database connection and update
-    pool = await init_db()
-    async with pool.acquire() as db:
-        # Update document in database
-        await update_document(
-            db,
-            doc_id,
-            doc_text=result["doc_text"],
-            doc_type=result["doc_type"],
-            ocr_blocks=result["ocr_blocks"],
-        )
+        # Get database connection and update
+        pool = await init_db()
+        async with pool.acquire() as db:
+            # Update document in database
+            await update_document(
+                db,
+                doc_id,
+                doc_text=result["doc_text"],
+                doc_type=result["doc_type"],
+                ocr_blocks=result["ocr_blocks"],
+            )
 
-        # Save extraction if present
-        if result["extraction"]:
-            await save_extraction(db, doc_id, result["doc_type"], result["extraction"])
+            # Save extraction if present
+            if result["extraction"]:
+                await save_extraction(db, doc_id, result["doc_type"], result["extraction"])
 
-    logger.info(f"Completed processing doc_id={doc_id}")
+        logger.info(f"Completed processing doc_id={doc_id}")
+
+    except Exception as e:
+        logger.error(f"Failed to process doc_id={doc_id}: {e}")
+        # Mark document as failed so it doesn't stay in "Processing" forever
+        try:
+            pool = await init_db()
+            async with pool.acquire() as db:
+                await update_document(
+                    db,
+                    doc_id,
+                    doc_text="[Processing failed]",
+                    doc_type="unknown",
+                )
+            logger.info(f"Marked doc_id={doc_id} as failed")
+        except Exception as update_err:
+            logger.error(f"Failed to mark doc_id={doc_id} as failed: {update_err}")

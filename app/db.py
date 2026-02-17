@@ -179,12 +179,14 @@ async def get_user_documents(
     limit: int = 50,
     offset: int = 0,
 ) -> List[Dict[str, Any]]:
-    """Get all documents for a user."""
+    """Get all documents for a user with extraction data."""
     query = """
-        SELECT id, s3_key, doc_type, doc_text, created_at
-        FROM documents
-        WHERE user_id = $1
-        ORDER BY created_at DESC
+        SELECT d.id, d.s3_key, d.doc_type, d.doc_text, d.created_at,
+               e.merchant, e.date as extracted_date, e.total_amount
+        FROM documents d
+        LEFT JOIN extractions e ON d.id = e.doc_id
+        WHERE d.user_id = $1
+        ORDER BY d.created_at DESC
         LIMIT $2 OFFSET $3
     """
     rows = await conn.fetch(query, user_id, limit, offset)
@@ -196,6 +198,9 @@ async def get_user_documents(
             "doc_type": row["doc_type"],
             "doc_text": row["doc_text"],
             "created_at": row["created_at"].isoformat(),
+            "merchant": row["merchant"],
+            "extracted_date": row["extracted_date"].isoformat() if row["extracted_date"] else None,
+            "total_amount": float(row["total_amount"]) if row["total_amount"] else None,
         }
         for row in rows
     ]
@@ -221,6 +226,41 @@ async def get_document_by_id(conn, doc_id: int, user_id: str) -> Dict[str, Any] 
         "ocr_blocks": json.loads(row["ocr_blocks"]) if row["ocr_blocks"] else [],
         "created_at": row["created_at"].isoformat(),
     }
+
+
+async def get_upcoming_events(
+    conn,
+    user_id: str,
+    days_ahead: int = 30,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """Get documents with dates in the upcoming period (for radar)."""
+    query = """
+        SELECT d.id, d.s3_key, d.doc_type, d.doc_text,
+               e.merchant, e.date as extracted_date, e.total_amount
+        FROM documents d
+        JOIN extractions e ON d.id = e.doc_id
+        WHERE d.user_id = $1
+          AND e.date IS NOT NULL
+          AND e.date >= CURRENT_DATE
+          AND e.date <= CURRENT_DATE + $2::interval
+        ORDER BY e.date ASC
+        LIMIT $3
+    """
+    rows = await conn.fetch(query, user_id, f"{days_ahead} days", limit)
+
+    return [
+        {
+            "id": row["id"],
+            "s3_key": row["s3_key"],
+            "doc_type": row["doc_type"],
+            "doc_text": row["doc_text"],
+            "merchant": row["merchant"],
+            "date": row["extracted_date"].isoformat() if row["extracted_date"] else None,
+            "total_amount": float(row["total_amount"]) if row["total_amount"] else None,
+        }
+        for row in rows
+    ]
 
 
 async def delete_documents(
