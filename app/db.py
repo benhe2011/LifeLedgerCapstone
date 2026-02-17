@@ -240,6 +240,8 @@ async def get_upcoming_events(
     to find upcoming deadlines, renewals, expirations, etc.
     Works for ANY document type, not just receipts.
     """
+    from datetime import timedelta
+
     query = """
         SELECT d.id, d.s3_key, d.doc_type, d.doc_text,
                d.event_date, d.event_description, d.event_entity,
@@ -249,11 +251,11 @@ async def get_upcoming_events(
         WHERE d.user_id = $1
           AND d.event_date IS NOT NULL
           AND d.event_date >= CURRENT_DATE
-          AND d.event_date <= CURRENT_DATE + $2::interval
+          AND d.event_date <= CURRENT_DATE + $2
         ORDER BY d.event_date ASC
         LIMIT $3
     """
-    rows = await conn.fetch(query, user_id, f"{days_ahead} days", limit)
+    rows = await conn.fetch(query, user_id, timedelta(days=days_ahead), limit)
 
     return [
         {
