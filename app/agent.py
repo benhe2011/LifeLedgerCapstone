@@ -14,6 +14,23 @@ from app.extraction import (
     get_receipts_by_date_range,
 )
 
+# Agent configuration (env-configurable)
+AGENT_TEMPERATURE = float(os.getenv("AGENT_TEMPERATURE", "0.3"))
+AGENT_MAX_RETRIES = int(os.getenv("AGENT_MAX_RETRIES", "0"))
+
+
+def repair_json(s: str) -> str:
+    """Attempt to fix common JSON issues from truncated LLM output."""
+    s = s.strip()
+    # Fix unterminated strings by closing them
+    if s.count('"') % 2 == 1:
+        s += '"'
+    # Close unclosed braces/brackets
+    open_braces = s.count('{') - s.count('}')
+    open_brackets = s.count('[') - s.count(']')
+    s += ']' * open_brackets + '}' * open_braces
+    return s
+
 
 TOOLS = [
     {
@@ -108,7 +125,16 @@ Today's date is {today}. Use this to interpret relative dates like "last month" 
 async def execute_tool(db, user_id: str, tool_call) -> str:
     """Execute a tool call and return JSON result."""
     name = tool_call.function.name
-    args = json.loads(tool_call.function.arguments)
+    raw_args = tool_call.function.arguments
+
+    # Handle malformed JSON from LLM - try repair if needed
+    try:
+        args = json.loads(raw_args)
+    except json.JSONDecodeError:
+        try:
+            args = json.loads(repair_json(raw_args))
+        except json.JSONDecodeError as e:
+            return json.dumps({"error": f"Invalid tool arguments: {e}"})
 
     if name == "search_documents":
         result = await search_documents(db, user_id, args["query"], limit=5)
@@ -127,7 +153,21 @@ async def execute_tool(db, user_id: str, tool_call) -> str:
 
 
 async def ask_agent(db, user_id: str, question: str) -> Dict[str, Any]:
-    """VLM-driven agent with tool calling."""
+    """VLM-driven agent with tool calling. Supports configurable retries."""
+    for attempt in range(AGENT_MAX_RETRIES + 1):
+        try:
+            return await _ask_agent_impl(db, user_id, question)
+        except Exception as e:
+            if attempt == AGENT_MAX_RETRIES:
+                return {
+                    "answer": "Sorry, I had trouble processing that. Please try again.",
+                    "sources": []
+                }
+            continue
+
+
+async def _ask_agent_impl(db, user_id: str, question: str) -> Dict[str, Any]:
+    """Internal implementation of ask_agent."""
     client = AsyncAzureOpenAI(
         azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
         api_key=os.getenv("AZURE_OPENAI_KEY"),
@@ -148,7 +188,8 @@ async def ask_agent(db, user_id: str, question: str) -> Dict[str, Any]:
             model=deployment,
             messages=messages,
             tools=TOOLS,
-            tool_choice="auto"
+            tool_choice="auto",
+            temperature=AGENT_TEMPERATURE,
         )
 
         msg = response.choices[0].message
