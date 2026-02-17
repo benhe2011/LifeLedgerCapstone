@@ -51,12 +51,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_total_spending",
-            "description": "Get total spending amount. Use for 'how much did I spend' questions.",
+            "description": "Get total spending amount. Use for 'how much did I spend' questions. Omit dates to query ALL TIME.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "start_date": {"type": "string", "description": "Start date YYYY-MM-DD"},
-                    "end_date": {"type": "string", "description": "End date YYYY-MM-DD"}
+                    "start_date": {"type": "string", "description": "Optional start date YYYY-MM-DD. Omit for all time."},
+                    "end_date": {"type": "string", "description": "Optional end date YYYY-MM-DD. Omit for all time."}
                 }
             }
         }
@@ -65,12 +65,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_spending_by_merchant",
-            "description": "Get spending broken down by merchant/store. Use for 'where do I spend the most' questions.",
+            "description": "Get spending broken down by merchant/store. Use for 'where do I spend the most' questions. Omit dates to query ALL TIME.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "start_date": {"type": "string", "description": "Start date YYYY-MM-DD"},
-                    "end_date": {"type": "string", "description": "End date YYYY-MM-DD"},
+                    "start_date": {"type": "string", "description": "Optional start date YYYY-MM-DD. Omit for all time."},
+                    "end_date": {"type": "string", "description": "Optional end date YYYY-MM-DD. Omit for all time."},
                     "limit": {"type": "integer", "description": "Max merchants to return", "default": 10}
                 }
             }
