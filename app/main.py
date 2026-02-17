@@ -20,12 +20,17 @@ from app.ocr_pipeline import process_image, process_batch_and_crawl
 from app.agent import ask_agent
 from app.radar_crawler import crawl_documents
 
-# Configure logging for background tasks
+# Configure logging for our app modules (uvicorn already configured root)
 import logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+import sys
+
+_log_handler = logging.StreamHandler(sys.stdout)
+_log_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+
+for _logger_name in ['app.ocr_pipeline', 'app.radar_crawler', 'app.vlm_client', 'app.db']:
+    _logger = logging.getLogger(_logger_name)
+    _logger.setLevel(logging.INFO)
+    _logger.addHandler(_log_handler)
 
 
 @asynccontextmanager
