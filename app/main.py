@@ -20,6 +20,13 @@ from app.ocr_pipeline import process_image, process_batch_and_crawl
 from app.agent import ask_agent
 from app.radar_crawler import crawl_documents
 
+# Configure logging for background tasks
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
