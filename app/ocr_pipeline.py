@@ -81,7 +81,7 @@ def classify_doc_type(ocr_text: str) -> str:
     if any(kw in text_lower for kw in ["policy", "premium", "coverage", "insured", "beneficiary"]):
         return "insurance"
 
-    return "unknown"
+    return "other"
 
 
 def calculate_confidence(ocr_result: List) -> float:
@@ -234,7 +234,7 @@ async def _process_image_internal(doc_id: int, s3_key: str) -> None:
                     db,
                     doc_id,
                     doc_text="[Processing failed]",
-                    doc_type="unknown",
+                    doc_type="other",
                 )
             logger.info(f"Marked doc_id={doc_id} as failed")
         except Exception as update_err:

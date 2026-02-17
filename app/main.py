@@ -371,7 +371,7 @@ async def get_radar(
             "id": str(event["id"]),
             "type": _normalize_doc_type(event.get("doc_type", "unknown")),
             "fileUrl": file_url,
-            "primaryEntity": event.get("merchant") or "Unknown",
+            "primaryEntity": event.get("event_description") or event.get("event_entity") or event.get("merchant") or "Unknown",
             "date": event.get("event_date"),
             "description": event.get("event_description") or "",
             "totalValue": f"${event['total_amount']:.2f}" if event.get("total_amount") else "",
@@ -431,7 +431,8 @@ def _normalize_doc_type(doc_type: str) -> str:
         "form": "Form",
         "warranty": "Form",
         "insurance": "Form",
-        "unknown": "Form",
+        "other": "Other",
+        "unknown": "Other",
     }
     return mapping.get(doc_type.lower(), "Form")
 
