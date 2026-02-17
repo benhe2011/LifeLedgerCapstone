@@ -9,11 +9,12 @@ can have an event date, not just receipts.
 
 Flow:
 1. Get documents with doc_text but not yet radar-processed
-2. Keyword filter: skip docs without deadline-related words
-3. Text-only LLM call for docs with keywords
+2. Keyword/date filter: skip docs without deadline words or date patterns
+3. Text-only LLM call for docs with keywords or dates
 4. Save event_date to documents table, mark as processed
 """
 import logging
+import re
 from typing import List, Dict, Any
 from datetime import datetime
 
@@ -36,6 +37,20 @@ def has_event_keywords(text: str) -> bool:
     """Check if text contains keywords suggesting an upcoming event."""
     text_lower = text.lower()
     return any(kw in text_lower for kw in EVENT_KEYWORDS)
+
+
+# Date patterns to detect dates even without keywords
+DATE_PATTERNS = [
+    r'\d{1,2}/\d{1,2}/\d{2,4}',  # M/D/YY or MM/DD/YYYY
+    r'\d{1,2}-\d{1,2}-\d{2,4}',  # M-D-YY or MM-DD-YYYY
+    r'\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+\d{1,2}',  # "March 2", "Jan 15th"
+]
+
+
+def has_date_pattern(text: str) -> bool:
+    """Check if text contains date-like patterns."""
+    text_lower = text.lower()
+    return any(re.search(p, text_lower) for p in DATE_PATTERNS)
 
 
 def parse_date(date_str: str) -> "datetime.date | None":
@@ -133,8 +148,8 @@ async def crawl_documents(user_id: str | None = None, limit: int = 50) -> Dict[s
             try:
                 doc_text = doc["doc_text"]
 
-                # Skip if no event keywords (fast filtering)
-                if not has_event_keywords(doc_text):
+                # Skip if no event keywords AND no date patterns (fast filtering)
+                if not has_event_keywords(doc_text) and not has_date_pattern(doc_text):
                     await mark_processed(db, doc["id"])
                     stats["skipped"] += 1
                     continue
