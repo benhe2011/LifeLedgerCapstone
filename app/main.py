@@ -18,6 +18,7 @@ from app.s3 import upload_to_s3, generate_presigned_url, download_from_s3, delet
 from app.db import get_db, create_document, search_documents, get_user_documents, get_document_by_id, update_document, delete_documents, get_upcoming_events
 from app.ocr_pipeline import process_image
 from app.agent import ask_agent
+from app.radar_crawler import crawl_documents
 
 
 @asynccontextmanager
@@ -215,6 +216,10 @@ async def upload_and_process(
             "status": "processing"
         })
 
+    # Also queue radar crawler to process newly uploaded docs for event dates
+    # Small delay to let OCR finish first, then crawl for deadlines/events
+    background_tasks.add_task(crawl_documents, user_id=user_id, limit=len(uploaded) + 5)
+
     return UploadAndProcessResponse(
         uploaded=uploaded,
         count=len(uploaded),
@@ -363,7 +368,8 @@ async def get_radar(
             "type": _normalize_doc_type(event.get("doc_type", "unknown")),
             "fileUrl": file_url,
             "primaryEntity": event.get("merchant") or "Unknown",
-            "date": event.get("date"),
+            "date": event.get("event_date"),
+            "description": event.get("event_description") or "",
             "totalValue": f"${event['total_amount']:.2f}" if event.get("total_amount") else "",
         })
 
@@ -379,6 +385,25 @@ async def ask_question(
     """Ask analytical questions about documents using the agent."""
     result = await ask_agent(db, user_id, request.question)
     return AskResponse(answer=result["answer"], sources=[str(s) for s in result["sources"]])
+
+
+@app.post("/internal/crawl-radar")
+async def trigger_radar_crawl(
+    limit: int = 50,
+    user_id: str = Depends(get_current_user),
+):
+    """Trigger radar crawler to process documents for event dates.
+
+    The crawler:
+    1. Finds documents with text but not yet radar-processed
+    2. Uses keyword filter to skip docs without deadline-related words
+    3. Calls text-only LLM to extract event dates from remaining docs
+    4. Updates event_date column for radar display
+
+    Can also be called via cron for background processing.
+    """
+    stats = await crawl_documents(user_id=user_id, limit=limit)
+    return {"status": "completed", **stats}
 
 
 # Helper functions for frontend format conversion

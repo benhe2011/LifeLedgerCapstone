@@ -234,17 +234,23 @@ async def get_upcoming_events(
     days_ahead: int = 30,
     limit: int = 20,
 ) -> List[Dict[str, Any]]:
-    """Get documents with dates in the upcoming period (for radar)."""
+    """Get documents with event dates in the upcoming period (for radar).
+
+    Uses event_date column on documents table (populated by radar crawler)
+    to find upcoming deadlines, renewals, expirations, etc.
+    Works for ANY document type, not just receipts.
+    """
     query = """
         SELECT d.id, d.s3_key, d.doc_type, d.doc_text,
-               e.merchant, e.date as extracted_date, e.total_amount
+               d.event_date, d.event_description, d.event_entity,
+               e.merchant, e.total_amount
         FROM documents d
-        JOIN extractions e ON d.id = e.doc_id
+        LEFT JOIN extractions e ON d.id = e.doc_id
         WHERE d.user_id = $1
-          AND e.date IS NOT NULL
-          AND e.date >= CURRENT_DATE
-          AND e.date <= CURRENT_DATE + $2::interval
-        ORDER BY e.date ASC
+          AND d.event_date IS NOT NULL
+          AND d.event_date >= CURRENT_DATE
+          AND d.event_date <= CURRENT_DATE + $2::interval
+        ORDER BY d.event_date ASC
         LIMIT $3
     """
     rows = await conn.fetch(query, user_id, f"{days_ahead} days", limit)
@@ -255,8 +261,9 @@ async def get_upcoming_events(
             "s3_key": row["s3_key"],
             "doc_type": row["doc_type"],
             "doc_text": row["doc_text"],
-            "merchant": row["merchant"],
-            "date": row["extracted_date"].isoformat() if row["extracted_date"] else None,
+            "event_date": row["event_date"].isoformat() if row["event_date"] else None,
+            "event_description": row["event_description"],
+            "merchant": row["event_entity"] or row["merchant"],  # Prefer event_entity, fallback to extraction merchant
             "total_amount": float(row["total_amount"]) if row["total_amount"] else None,
         }
         for row in rows

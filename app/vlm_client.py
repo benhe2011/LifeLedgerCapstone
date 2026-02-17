@@ -110,6 +110,45 @@ Example: {"merchant": "Target", "date": "2024-01-15", "total_amount": 45.99, "ad
         return None
 
 
+async def extract_event_from_text(doc_text: str) -> Dict[str, Any] | None:
+    """Extract event date from document text using text-only LLM (cheap/fast).
+
+    Used by the radar crawler to identify upcoming dates without vision calls.
+    """
+    client = get_vlm_client()
+    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1")
+
+    response = await client.chat.completions.create(
+        model=deployment,
+        messages=[
+            {
+                "role": "system",
+                "content": """Extract upcoming/future dates from this document text.
+Look for: due dates, renewal dates, expiration dates, deadlines, appointment dates.
+
+Respond in JSON:
+{
+  "event_date": "YYYY-MM-DD or null",
+  "event_description": "Brief description or null",
+  "entity": "Business/person name or null"
+}
+
+Only extract FUTURE dates. Ignore past dates (receipts, purchase dates)."""
+            },
+            {"role": "user", "content": doc_text}
+        ],
+        max_tokens=200,
+        temperature=0.1,
+        response_format={"type": "json_object"},
+    )
+
+    import json
+    try:
+        return json.loads(response.choices[0].message.content)
+    except json.JSONDecodeError:
+        return None
+
+
 async def ask_vlm(image_bytes: bytes | None, question: str, context: str = "") -> str:
     """Ask a question to the VLM with optional image."""
     client = get_vlm_client()
