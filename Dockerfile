@@ -21,9 +21,6 @@ RUN mkdir -p /certs && \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-download PaddleOCR models (avoids first-run delay)
-RUN python -c "from paddleocr import PaddleOCR; PaddleOCR(use_angle_cls=True, lang='en')"
-
 # Copy application code
 COPY app/ ./app/
 
