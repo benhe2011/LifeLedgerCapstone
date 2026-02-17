@@ -8,7 +8,8 @@ import os
 import logging
 from typing import Dict, List, Any
 
-from PIL import Image
+import numpy as np
+from PIL import Image, ImageOps
 from paddleocr import PaddleOCR
 
 from app.s3 import download_from_s3
@@ -35,6 +36,29 @@ def get_ocr_model() -> PaddleOCR:
         _ocr_model = PaddleOCR(use_angle_cls=True, lang="en", use_gpu=False)
         logger.info("PaddleOCR model loaded")
     return _ocr_model
+
+
+def preprocess_image(image_bytes: bytes) -> bytes:
+    """Preprocess image for OCR - invert if predominantly dark."""
+    img = Image.open(io.BytesIO(image_bytes))
+
+    # Convert to RGB if needed (handles PNG with alpha, grayscale, etc.)
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+
+    # Check if image is predominantly dark (mean brightness < 127)
+    grayscale = img.convert("L")
+    mean_brightness = np.array(grayscale).mean()
+
+    if mean_brightness < 127:
+        # Dark image - invert colors for better OCR
+        img = ImageOps.invert(img)
+        logger.info(f"Inverted dark image (brightness={mean_brightness:.1f})")
+
+    # Convert back to bytes
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 def classify_doc_type(ocr_text: str) -> str:
@@ -100,9 +124,12 @@ def extract_text_and_boxes(ocr_result: List) -> tuple[str, List[Dict[str, Any]]]
 
 async def run_ocr_pipeline(image_bytes: bytes) -> Dict[str, Any]:
     """Run OCR pipeline on image bytes and return results."""
+    # Preprocess image (invert if dark)
+    processed_bytes = preprocess_image(image_bytes)
+
     # Run PaddleOCR
     ocr = get_ocr_model()
-    result = ocr.ocr(image_bytes, cls=True)
+    result = ocr.ocr(processed_bytes, cls=True)
 
     # Extract text and bounding boxes
     doc_text, ocr_blocks = extract_text_and_boxes(result)
@@ -143,6 +170,28 @@ async def process_image(doc_id: int, s3_key: str) -> None:
     async with _processing_semaphore:
         logger.info(f"Processing doc_id={doc_id}, s3_key={s3_key}")
         await _process_image_internal(doc_id, s3_key)
+
+
+async def process_batch_and_crawl(docs: List[Dict[str, Any]], user_id: str) -> None:
+    """
+    Process a batch of documents, then run radar crawler.
+    Uses asyncio.gather to process all docs (semaphore limits concurrency).
+    Crawler runs once after all processing completes.
+    """
+    from app.radar_crawler import crawl_documents
+
+    # Process all images concurrently (semaphore limits actual parallelism)
+    await asyncio.gather(*[
+        process_image(doc["doc_id"], doc["s3_key"])
+        for doc in docs
+    ], return_exceptions=True)
+
+    # All done, now crawl for event dates
+    try:
+        stats = await crawl_documents(user_id=user_id, limit=len(docs) + 5)
+        logger.info(f"Radar crawl after batch: {stats}")
+    except Exception as e:
+        logger.warning(f"Radar crawl failed after batch: {e}")
 
 
 async def _process_image_internal(doc_id: int, s3_key: str) -> None:

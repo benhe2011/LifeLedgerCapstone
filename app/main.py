@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from app.auth import get_current_user
 from app.s3 import upload_to_s3, generate_presigned_url, download_from_s3, delete_many_from_s3
 from app.db import get_db, create_document, search_documents, get_user_documents, get_document_by_id, update_document, delete_documents, get_upcoming_events
-from app.ocr_pipeline import process_image
+from app.ocr_pipeline import process_image, process_batch_and_crawl
 from app.agent import ask_agent
 from app.radar_crawler import crawl_documents
 
@@ -147,13 +147,9 @@ async def process_document(
     elif request.s3_key and request.row_id:
         items_to_process = [{"s3_key": request.s3_key, "row_id": request.row_id}]
 
-    # Queue background processing for each item
-    for item in items_to_process:
-        background_tasks.add_task(
-            process_image,
-            int(item["row_id"]),
-            item["s3_key"],
-        )
+    # Single background task for batch + crawler
+    docs = [{"doc_id": int(item["row_id"]), "s3_key": item["s3_key"]} for item in items_to_process]
+    background_tasks.add_task(process_batch_and_crawl, docs, user_id)
 
     return ProcessResponse(
         status="processing",
@@ -206,9 +202,6 @@ async def upload_and_process(
         # Create DB record
         doc_id = await create_document(db, user_id, s3_key)
 
-        # Queue background processing (semaphore in process_image limits concurrency)
-        background_tasks.add_task(process_image, doc_id, s3_key)
-
         uploaded.append({
             "doc_id": doc_id,
             "s3_key": s3_key,
@@ -216,9 +209,8 @@ async def upload_and_process(
             "status": "processing"
         })
 
-    # Also queue radar crawler to process newly uploaded docs for event dates
-    # Small delay to let OCR finish first, then crawl for deadlines/events
-    background_tasks.add_task(crawl_documents, user_id=user_id, limit=len(uploaded) + 5)
+    # Single background task for batch + crawler
+    background_tasks.add_task(process_batch_and_crawl, uploaded, user_id)
 
     return UploadAndProcessResponse(
         uploaded=uploaded,
