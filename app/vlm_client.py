@@ -130,11 +130,11 @@ Look for: due dates, renewal dates, expiration dates, deadlines, appointment dat
 Today's date is {date.today().isoformat()}. Use this to resolve relative dates like "tomorrow", "next week", "in 3 days".
 
 Respond in JSON:
-{
+{{
   "event_date": "YYYY-MM-DD or null",
   "event_description": "Brief description or null",
   "entity": "Business/person name or null"
-}
+}}
 
 Only extract FUTURE dates. Ignore past dates (receipts, purchase dates)."""
             },
