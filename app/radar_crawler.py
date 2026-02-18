@@ -26,10 +26,18 @@ logger = logging.getLogger(__name__)
 
 # Keywords that suggest a document might have an upcoming date
 EVENT_KEYWORDS = [
+    # Explicit deadline words
     "due", "expires", "expiration", "renew", "renewal", "deadline",
-    "payment due", "bill", "invoice", "subscription", "appointment",
+    "payment due", "bill", "invoice", "subscription", "appointment", "appt",
     "scheduled", "reminder", "by date", "valid until", "ends",
     "before", "overdue", "past due", "balance due",
+    # Relative date words
+    "tomorrow", "next week", "next month", "next year",
+    "in a week", "in a month", "in a day", "in 2 days", "in 3 days",
+    "this week", "this month", "this friday", "this monday",
+    "this tuesday", "this wednesday", "this thursday", "this saturday", "this sunday",
+    "next monday", "next tuesday", "next wednesday", "next thursday", "next friday",
+    "upcoming", "soon", "later today", "tonight",
 ]
 
 
