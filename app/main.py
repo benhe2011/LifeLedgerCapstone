@@ -354,7 +354,7 @@ async def get_related_documents(
             "fileUrl": file_url,
             "status": _get_status(doc),
             "primaryEntity": _extract_primary_entity(doc),
-            "primaryDate": str(doc["created_at"].date()) if doc.get("created_at") else "",
+            "primaryDate": doc["created_at"][:10] if doc.get("created_at") else "",
             "totalValue": "",
             "similarity": round(doc.get("similarity", 0) * 100),
         })

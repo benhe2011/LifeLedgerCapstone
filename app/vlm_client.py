@@ -1,6 +1,7 @@
 """Azure GPT-4.1 VLM client for OCR refinement and field extraction."""
 import os
 import base64
+from datetime import date
 from typing import Dict, Any
 
 from openai import AsyncAzureOpenAI
@@ -123,8 +124,10 @@ async def extract_event_from_text(doc_text: str) -> Dict[str, Any] | None:
         messages=[
             {
                 "role": "system",
-                "content": """Extract upcoming/future dates from this document text.
+                "content": f"""Extract upcoming/future dates from this document text.
 Look for: due dates, renewal dates, expiration dates, deadlines, appointment dates.
+
+Today's date is {date.today().isoformat()}. Use this to resolve relative dates like "tomorrow", "next week", "in 3 days".
 
 Respond in JSON:
 {

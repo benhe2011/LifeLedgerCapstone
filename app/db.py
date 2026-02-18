@@ -211,7 +211,7 @@ async def get_similar_documents(
             "s3_key": row["s3_key"],
             "doc_type": row["doc_type"],
             "doc_text": row["doc_text"],
-            "created_at": row["created_at"],
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
             "similarity": float(row["similarity"]),
         }
         for row in rows
