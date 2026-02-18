@@ -138,9 +138,8 @@ async def run_ocr_pipeline(image_bytes: bytes) -> Dict[str, Any]:
     # Mark if no text was detected (so status doesn't stay "Processing")
     if not doc_text:
         doc_text = "[No text detected]"
-
-    # Use VLM refinement if confidence is low
-    if confidence < 0.7 and doc_text:
+    elif confidence < 0.7:
+        # Only use VLM refinement if we have actual OCR text to refine
         try:
             doc_text = await refine_ocr_with_vlm(image_bytes, doc_text)
         except Exception as e:
