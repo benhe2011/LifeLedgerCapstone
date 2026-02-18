@@ -37,7 +37,11 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: initialize OCR model (lazy load on first use)
+    # Startup: pre-warm OCR model to avoid cold start on first request
+    from app.ocr_pipeline import get_ocr_model
+    logger.info("Pre-warming PaddleOCR model...")
+    get_ocr_model()
+    logger.info("PaddleOCR model ready")
     yield
     # Shutdown: cleanup if needed
 
