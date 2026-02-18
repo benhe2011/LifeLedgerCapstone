@@ -173,6 +173,51 @@ async def search_documents(
     ]
 
 
+async def get_similar_documents(
+    conn,
+    doc_id: int,
+    user_id: str,
+    limit: int = 4,
+) -> List[Dict[str, Any]]:
+    """Get documents similar to the given document using vector similarity."""
+    # First get the source document's vector
+    source = await conn.fetchrow(
+        "SELECT text_vector FROM documents WHERE id = $1 AND user_id = $2",
+        doc_id, user_id
+    )
+    if not source or not source["text_vector"]:
+        return []
+
+    source_vector = source["text_vector"]
+
+    # Find similar documents (excluding the source document)
+    rows = await conn.fetch(
+        """
+        SELECT id, s3_key, doc_type, doc_text, created_at,
+               1 - (text_vector <=> $1::vector) as similarity
+        FROM documents
+        WHERE user_id = $2
+          AND id != $3
+          AND text_vector IS NOT NULL
+        ORDER BY text_vector <=> $1::vector
+        LIMIT $4
+        """,
+        str(source_vector), user_id, doc_id, limit
+    )
+
+    return [
+        {
+            "id": row["id"],
+            "s3_key": row["s3_key"],
+            "doc_type": row["doc_type"],
+            "doc_text": row["doc_text"],
+            "created_at": row["created_at"],
+            "similarity": float(row["similarity"]),
+        }
+        for row in rows
+    ]
+
+
 async def get_user_documents(
     conn,
     user_id: str,

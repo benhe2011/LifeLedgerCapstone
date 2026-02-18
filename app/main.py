@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from app.auth import get_current_user
 from app.s3 import upload_to_s3, generate_presigned_url, download_from_s3, delete_many_from_s3
-from app.db import get_db, create_document, search_documents, get_user_documents, get_document_by_id, update_document, delete_documents, get_upcoming_events
+from app.db import get_db, create_document, search_documents, get_user_documents, get_document_by_id, update_document, delete_documents, get_upcoming_events, get_similar_documents
 from app.ocr_pipeline import process_image, process_batch_and_crawl
 from app.agent import ask_agent
 from app.radar_crawler import crawl_documents
@@ -333,6 +333,33 @@ async def get_document(
         "ocr_blocks": doc.get("ocr_blocks", []),
         "doc_text": doc.get("doc_text"),
     }
+
+
+@app.get("/documents/{doc_id}/related")
+async def get_related_documents(
+    doc_id: str,
+    limit: int = 4,
+    user_id: str = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Get documents similar to the given document using vector similarity."""
+    docs = await get_similar_documents(db, int(doc_id), user_id, limit)
+
+    related = []
+    for doc in docs:
+        file_url = await generate_presigned_url(doc["s3_key"])
+        related.append({
+            "id": str(doc["id"]),
+            "type": _normalize_doc_type(doc.get("doc_type", "other")),
+            "fileUrl": file_url,
+            "status": _get_status(doc),
+            "primaryEntity": _extract_primary_entity(doc),
+            "primaryDate": str(doc["created_at"].date()) if doc.get("created_at") else "",
+            "totalValue": "",
+            "similarity": round(doc.get("similarity", 0) * 100),
+        })
+
+    return related
 
 
 @app.delete("/documents")
