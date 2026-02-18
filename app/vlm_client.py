@@ -136,6 +136,7 @@ Respond in JSON:
   "entity": "Business/person name or null"
 }}
 
+If multiple future dates exist, return the SOONEST one.
 Only extract FUTURE dates. Ignore past dates (receipts, purchase dates)."""
             },
             {"role": "user", "content": doc_text}
