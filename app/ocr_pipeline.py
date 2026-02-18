@@ -135,6 +135,10 @@ async def run_ocr_pipeline(image_bytes: bytes) -> Dict[str, Any]:
     doc_text, ocr_blocks = extract_text_and_boxes(result)
     confidence = calculate_confidence(result)
 
+    # Mark if no text was detected (so status doesn't stay "Processing")
+    if not doc_text:
+        doc_text = "[No text detected]"
+
     # Use VLM refinement if confidence is low
     if confidence < 0.7 and doc_text:
         try:

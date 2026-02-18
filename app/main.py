@@ -32,6 +32,8 @@ for _logger_name in ['app.ocr_pipeline', 'app.radar_crawler', 'app.vlm_client', 
     _logger.setLevel(logging.INFO)
     _logger.addHandler(_log_handler)
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -91,6 +93,10 @@ class AskRequest(BaseModel):
 
 class DeleteRequest(BaseModel):
     document_ids: List[int]
+
+
+class ReviewRequest(BaseModel):
+    note: str = ""  # Optional, max 500 chars
 
 
 class LineItem(BaseModel):
@@ -355,6 +361,74 @@ async def delete_documents_endpoint(
     }
 
 
+@app.patch("/documents/{doc_id}/review")
+async def review_document(
+    doc_id: str,
+    request: ReviewRequest,
+    user_id: str = Depends(get_current_user),
+    db=Depends(get_db),
+    background_tasks: BackgroundTasks = None,
+):
+    """Submit manual review for a document. One-time only.
+
+    Updates doc_text with the user's note, re-classifies doc_type,
+    and optionally extracts receipt fields or triggers radar crawler.
+    """
+    # Validate note length
+    if len(request.note) > 500:
+        raise HTTPException(status_code=400, detail="Note must be 500 characters or less")
+
+    # Get document and verify ownership
+    doc = await get_document_by_id(db, int(doc_id), user_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Only allow review for "Needs Review" documents
+    current_text = doc.get("doc_text", "")
+    if current_text not in ("[Processing failed]", "[No text detected]", ""):
+        raise HTTPException(status_code=400, detail="Document not in reviewable state")
+
+    # Update doc_text with user's note (or "[Reviewed]" if empty)
+    new_text = request.note.strip() if request.note.strip() else "[Reviewed]"
+    await db.execute(
+        "UPDATE documents SET doc_text = $1 WHERE id = $2",
+        new_text, int(doc_id)
+    )
+
+    # Re-classify doc_type based on user's text
+    from app.ocr_pipeline import classify_doc_type
+    new_doc_type = classify_doc_type(new_text)
+    await db.execute(
+        "UPDATE documents SET doc_type = $1 WHERE id = $2",
+        new_doc_type, int(doc_id)
+    )
+
+    # If it looks like a receipt, extract fields from text (no image needed)
+    if new_doc_type == "receipt" and request.note.strip():
+        from app.vlm_client import extract_receipt_from_text
+        from app.extraction import save_extraction
+        try:
+            extraction = await extract_receipt_from_text(request.note)
+            if extraction:
+                await save_extraction(db, int(doc_id), "receipt", extraction)
+        except Exception as e:
+            logger.warning(f"Text extraction failed for doc {doc_id}: {e}")
+
+    # Optionally trigger crawler if note has date patterns/keywords
+    if request.note.strip() and background_tasks:
+        from app.radar_crawler import has_event_keywords, has_date_pattern
+        if has_event_keywords(request.note) or has_date_pattern(request.note):
+            # Reset radar_processed so crawler picks it up
+            await db.execute(
+                "UPDATE documents SET radar_processed = FALSE WHERE id = $1",
+                int(doc_id)
+            )
+            # Run crawler for this user in background
+            background_tasks.add_task(crawl_documents, user_id=user_id, limit=5)
+
+    return {"status": "ok", "message": "Review submitted"}
+
+
 @app.get("/radar")
 async def get_radar(
     user_id: str = Depends(get_current_user),
@@ -416,7 +490,7 @@ def _get_status(doc: dict) -> str:
     text = doc.get("doc_text", "")
     if not text:
         return "Processing"
-    if text == "[Processing failed]":
+    if text in ("[Processing failed]", "[No text detected]"):
         return "Needs Review"
     return "Done"
 

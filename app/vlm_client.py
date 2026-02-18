@@ -149,6 +149,44 @@ Only extract FUTURE dates. Ignore past dates (receipts, purchase dates)."""
         return None
 
 
+async def extract_receipt_from_text(text: str) -> Dict[str, Any] | None:
+    """Extract receipt fields from user-provided text (no image needed).
+
+    Used when user manually inputs text for a document that OCR couldn't read.
+    """
+    client = get_vlm_client()
+    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1")
+
+    response = await client.chat.completions.create(
+        model=deployment,
+        messages=[
+            {
+                "role": "system",
+                "content": """Extract receipt information from this text.
+
+Respond in JSON:
+{
+  "merchant": "Store/business name or null",
+  "total_amount": numeric amount or null,
+  "date": "YYYY-MM-DD or null"
+}
+
+Only extract what's clearly present. Use null for missing fields."""
+            },
+            {"role": "user", "content": text}
+        ],
+        max_tokens=200,
+        temperature=0,
+        response_format={"type": "json_object"},
+    )
+
+    import json
+    try:
+        return json.loads(response.choices[0].message.content)
+    except json.JSONDecodeError:
+        return None
+
+
 async def ask_vlm(image_bytes: bytes | None, question: str, context: str = "") -> str:
     """Ask a question to the VLM with optional image."""
     client = get_vlm_client()
