@@ -421,17 +421,18 @@ async def review_document(
 
     # Update doc_text with user's note (or "[Reviewed]" if empty)
     new_text = request.note.strip() if request.note.strip() else "[Reviewed]"
-    await db.execute(
-        "UPDATE documents SET doc_text = $1 WHERE id = $2",
-        new_text, int(doc_id)
-    )
 
     # Re-classify doc_type based on user's text
     from app.ocr_pipeline import classify_doc_type
     new_doc_type = classify_doc_type(new_text)
-    await db.execute(
-        "UPDATE documents SET doc_type = $1 WHERE id = $2",
-        new_doc_type, int(doc_id)
+
+    # Update document with embedding generation (reuse existing ocr_blocks)
+    await update_document(
+        db,
+        int(doc_id),
+        doc_text=new_text,
+        doc_type=new_doc_type,
+        ocr_blocks=doc.get("ocr_blocks", []),
     )
 
     # If it looks like a receipt, extract fields from text (no image needed)
