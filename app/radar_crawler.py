@@ -52,7 +52,7 @@ DATE_PATTERNS = [
     r'\d{1,2}/\d{1,2}/\d{2,4}',  # M/D/YY or MM/DD/YYYY
     r'\d{1,2}-\d{1,2}-\d{2,4}',  # M-D-YY or MM-DD-YYYY
     r'\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+\d{1,2}',  # "March 2", "Jan 15th"
-    r'\bin \d+ (?:day|week|month|year)s?\b',  # "in 2 weeks", "in 3 days", etc.
+    r'\bin \d+(?:\.\d+)? (?:day|week|month|year)s?\b',  # "in 2 weeks", "in 1.5 days", etc.
 ]
 
 
