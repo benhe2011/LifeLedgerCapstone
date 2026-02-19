@@ -144,8 +144,13 @@ async def search_documents(
     user_id: str,
     query: str,
     limit: int = 10,
+    min_similarity: float = 0.3,
 ) -> List[Dict[str, Any]]:
-    """Search documents using semantic similarity."""
+    """Search documents using semantic similarity.
+
+    Args:
+        min_similarity: Minimum similarity threshold (0.0-1.0). Default 0.3 (30%).
+    """
     # Generate query embedding
     model = get_embedding_model()
     query_embedding = model.encode(query).tolist()
@@ -154,11 +159,14 @@ async def search_documents(
         SELECT id, s3_key, doc_type, doc_text, created_at,
                1 - (text_vector <=> $3::vector) as similarity
         FROM documents
-        WHERE user_id = $1 AND text_vector IS NOT NULL
+        WHERE user_id = $1
+          AND text_vector IS NOT NULL
+          AND 1 - (text_vector <=> $3::vector) >= $4
+          AND doc_text NOT IN ('[No text detected]', '[Processing failed]')
         ORDER BY text_vector <=> $3::vector
         LIMIT $2
     """
-    rows = await conn.fetch(sql, user_id, limit, str(query_embedding))
+    rows = await conn.fetch(sql, user_id, limit, str(query_embedding), min_similarity)
 
     return [
         {
