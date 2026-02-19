@@ -320,20 +320,18 @@ async def get_upcoming_events(
     ]
 
 
-async def delete_documents(
+async def get_documents_for_delete(
     conn,
     doc_ids: List[int],
     user_id: str,
-) -> List[str]:
-    """Delete documents and their extractions, returning S3 keys for cleanup.
+) -> tuple[List[int], List[str]]:
+    """Get valid doc IDs and S3 keys for deletion.
 
-    Returns list of s3_keys that need to be deleted from S3.
-    Only deletes documents owned by the specified user_id.
+    Returns (valid_ids, s3_keys) for documents owned by the specified user_id.
     """
     if not doc_ids:
-        return []
+        return [], []
 
-    # First, get the s3_keys for documents owned by this user
     query = """
         SELECT id, s3_key FROM documents
         WHERE id = ANY($1::int[]) AND user_id = $2
@@ -341,23 +339,34 @@ async def delete_documents(
     rows = await conn.fetch(query, doc_ids, user_id)
 
     if not rows:
-        return []
+        return [], []
 
-    # Get the actual IDs that belong to this user (security check)
     valid_ids = [row["id"] for row in rows]
     s3_keys = [row["s3_key"] for row in rows]
+    return valid_ids, s3_keys
+
+
+async def delete_document_records(
+    conn,
+    doc_ids: List[int],
+    user_id: str,
+) -> None:
+    """Delete extractions and documents from DB.
+
+    Call this AFTER deleting from S3 to avoid orphaned files.
+    """
+    if not doc_ids:
+        return
 
     # Delete extractions first (child table with FK constraint)
     await conn.execute(
         "DELETE FROM extractions WHERE doc_id = ANY($1::int[])",
-        valid_ids
+        doc_ids
     )
 
     # Delete documents
     await conn.execute(
         "DELETE FROM documents WHERE id = ANY($1::int[]) AND user_id = $2",
-        valid_ids,
+        doc_ids,
         user_id
     )
-
-    return s3_keys

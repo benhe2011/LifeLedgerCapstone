@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from app.auth import get_current_user
 from app.s3 import upload_to_s3, generate_presigned_url, download_from_s3, delete_many_from_s3
-from app.db import get_db, create_document, search_documents, get_user_documents, get_document_by_id, update_document, delete_documents, get_upcoming_events, get_similar_documents
+from app.db import get_db, create_document, search_documents, get_user_documents, get_document_by_id, update_document, get_documents_for_delete, delete_document_records, get_upcoming_events, get_similar_documents
 from app.ocr_pipeline import process_image, process_batch_and_crawl
 from app.agent import ask_agent
 from app.radar_crawler import crawl_documents
@@ -371,24 +371,29 @@ async def delete_documents_endpoint(
     """Delete multiple documents and their associated S3 objects.
 
     Only deletes documents owned by the authenticated user.
+    Deletes S3 first, then DB to avoid orphaned files.
     """
     if not request.document_ids:
         raise HTTPException(status_code=400, detail="No document IDs provided")
 
-    # Delete from database and get S3 keys
-    s3_keys = await delete_documents(db, request.document_ids, user_id)
+    # 1. Get S3 keys (query only, no delete yet)
+    valid_ids, s3_keys = await get_documents_for_delete(db, request.document_ids, user_id)
 
-    if not s3_keys:
-        raise HTTPException(status_code=404, detail="No documents found to delete")
+    if not valid_ids:
+        # Idempotent: return success even if already deleted
+        return {"deleted_count": 0, "s3_deleted": 0, "s3_errors": 0, "message": "No documents found"}
 
-    # Delete from S3
+    # 2. Delete from S3 FIRST (so DB record exists if this fails)
     s3_result = await delete_many_from_s3(s3_keys)
 
+    # 3. Delete from DB (extractions, then documents)
+    await delete_document_records(db, valid_ids, user_id)
+
     return {
-        "deleted_count": len(s3_keys),
+        "deleted_count": len(valid_ids),
         "s3_deleted": s3_result["deleted"],
         "s3_errors": s3_result["errors"],
-        "message": f"Deleted {len(s3_keys)} document(s)",
+        "message": f"Deleted {len(valid_ids)} document(s)",
     }
 
 
