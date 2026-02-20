@@ -35,7 +35,9 @@ async def refine_ocr_with_vlm(image_bytes: bytes, ocr_text: str) -> str:
                 "role": "system",
                 "content": "You are an OCR refinement assistant. Given an image and noisy OCR output, "
                            "produce clean, accurate text. Preserve the original structure and content. "
-                           "Only fix obvious OCR errors, do not add or remove information."
+                           "Only fix obvious OCR errors, do not add or remove information. "
+                           "If the image contains no meaningful readable text (the OCR output is just "
+                           "visual noise misinterpreted as characters), respond with exactly: [No text detected]"
             },
             {
                 "role": "user",
