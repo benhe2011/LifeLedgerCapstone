@@ -126,15 +126,32 @@ class DocumentResponse(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
 
 
+class SafetyInfo(BaseModel):
+    """Content safety metadata when a response is blocked."""
+    strategy: str
+    message: str
+    detail: Optional[str] = None
+
+
+class GroundednessInfo(BaseModel):
+    """Groundedness warning metadata."""
+    ungrounded_pct: float
+    message: str
+
+
 class SearchResult(BaseModel):
     answer: str
     documents: List[DocumentResponse]
     query: str
+    safety: Optional[SafetyInfo] = None
+    groundedness: Optional[GroundednessInfo] = None
 
 
 class AskResponse(BaseModel):
     answer: str
     sources: List[str]  # Document IDs
+    safety: Optional[SafetyInfo] = None
+    groundedness: Optional[GroundednessInfo] = None
 
 
 class UploadAndProcessResponse(BaseModel):
@@ -288,10 +305,20 @@ async def search(
             metadata=doc.get("metadata"),
         ))
 
+    safety = None
+    if agent_result.get("safety"):
+        safety = SafetyInfo(**agent_result["safety"])
+
+    groundedness = None
+    if agent_result.get("groundedness"):
+        groundedness = GroundednessInfo(**agent_result["groundedness"])
+
     return SearchResult(
         answer=agent_result["answer"],
         documents=frontend_docs,
         query=request.query,
+        safety=safety,
+        groundedness=groundedness,
     )
 
 
@@ -431,9 +458,9 @@ async def review_document(
 
     # ── Content Safety: moderate review note ──
     if request.note.strip():
-        note_safe, note_msg = await moderate_user_text(request.note)
-        if not note_safe:
-            raise HTTPException(status_code=400, detail=note_msg)
+        gate_result = await moderate_user_text(request.note)
+        if not gate_result.is_safe:
+            raise HTTPException(status_code=400, detail=gate_result.message)
 
     # Get document and verify ownership
     doc = await get_document_by_id(db, int(doc_id), user_id)
@@ -520,7 +547,21 @@ async def ask_question(
 ):
     """Ask analytical questions about documents using the agent."""
     result = await ask_agent(db, user_id, request.question)
-    return AskResponse(answer=result["answer"], sources=[str(s) for s in result["sources"]])
+
+    safety = None
+    if result.get("safety"):
+        safety = SafetyInfo(**result["safety"])
+
+    groundedness = None
+    if result.get("groundedness"):
+        groundedness = GroundednessInfo(**result["groundedness"])
+
+    return AskResponse(
+        answer=result["answer"],
+        sources=[str(s) for s in result["sources"]],
+        safety=safety,
+        groundedness=groundedness,
+    )
 
 
 @app.post("/internal/crawl-radar")
