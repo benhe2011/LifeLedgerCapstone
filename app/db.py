@@ -98,6 +98,17 @@ async def create_tables():
             )
         """)
 
+        # Create regenerate_events table (tracks rejected AI answers)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS regenerate_events (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                query_text TEXT NOT NULL,
+                rejected_answer TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+
 
 async def create_document(conn, user_id: str, s3_key: str) -> int:
     """Create a new document record."""
@@ -377,4 +388,15 @@ async def delete_document_records(
         "DELETE FROM documents WHERE id = ANY($1::int[]) AND user_id = $2",
         doc_ids,
         user_id
+    )
+
+
+async def log_regenerate(conn, user_id: str, query_text: str, rejected_answer: str) -> None:
+    """Log a rejected AI answer when user clicks regenerate."""
+    await conn.execute(
+        """
+        INSERT INTO regenerate_events (user_id, query_text, rejected_answer)
+        VALUES ($1, $2, $3)
+        """,
+        user_id, query_text, rejected_answer,
     )
