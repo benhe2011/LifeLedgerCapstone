@@ -19,6 +19,7 @@ from app.db import get_db, create_document, search_documents, get_user_documents
 from app.ocr_pipeline import process_image, process_batch_and_crawl
 from app.agent import ask_agent
 from app.radar_crawler import crawl_documents
+from app.content_safety import moderate_image, moderate_user_text
 
 # Configure logging for our app modules (uvicorn already configured root)
 import logging
@@ -27,7 +28,7 @@ import sys
 _log_handler = logging.StreamHandler(sys.stdout)
 _log_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 
-for _logger_name in ['app.ocr_pipeline', 'app.radar_crawler', 'app.vlm_client', 'app.db']:
+for _logger_name in ['app.ocr_pipeline', 'app.radar_crawler', 'app.vlm_client', 'app.db', 'app.content_safety', 'app.agent']:
     _logger = logging.getLogger(_logger_name)
     _logger.setLevel(logging.INFO)
     _logger.addHandler(_log_handler)
@@ -195,6 +196,13 @@ async def upload_images(
 
     for file in files:
         content = await file.read()
+
+        # ── Content Safety: image moderation ──
+        img_safe, img_msg = await moderate_image(content)
+        if not img_safe:
+            logger.warning("Image rejected for %s: %s", file.filename, img_msg)
+            continue
+
         s3_key = await upload_to_s3(content, user_id, file.filename)
         doc_id = await create_document(db, user_id, s3_key)
         uploaded.append({"doc_id": doc_id, "s3_key": s3_key, "filename": file.filename})
@@ -219,6 +227,13 @@ async def upload_and_process(
     for file in files:
         # Upload to S3
         content = await file.read()
+
+        # ── Content Safety: image moderation ──
+        img_safe, img_msg = await moderate_image(content)
+        if not img_safe:
+            logger.warning("Image rejected for %s: %s", file.filename, img_msg)
+            continue
+
         s3_key = await upload_to_s3(content, user_id, file.filename)
 
         # Create DB record
@@ -413,6 +428,12 @@ async def review_document(
     # Validate note length
     if len(request.note) > 500:
         raise HTTPException(status_code=400, detail="Note must be 500 characters or less")
+
+    # ── Content Safety: moderate review note ──
+    if request.note.strip():
+        note_safe, note_msg = await moderate_user_text(request.note)
+        if not note_safe:
+            raise HTTPException(status_code=400, detail=note_msg)
 
     # Get document and verify ownership
     doc = await get_document_by_id(db, int(doc_id), user_id)
