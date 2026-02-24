@@ -19,6 +19,7 @@ from app.db import get_db, create_document, search_documents, get_user_documents
 from app.ocr_pipeline import process_image, process_batch_and_crawl
 from app.agent import ask_agent
 from app.radar_crawler import crawl_documents
+from app.content_safety import moderate_image, moderate_user_text
 
 # Configure logging for our app modules (uvicorn already configured root)
 import logging
@@ -27,7 +28,7 @@ import sys
 _log_handler = logging.StreamHandler(sys.stdout)
 _log_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 
-for _logger_name in ['app.ocr_pipeline', 'app.radar_crawler', 'app.vlm_client', 'app.db']:
+for _logger_name in ['app.ocr_pipeline', 'app.radar_crawler', 'app.vlm_client', 'app.db', 'app.content_safety', 'app.agent']:
     _logger = logging.getLogger(_logger_name)
     _logger.setLevel(logging.INFO)
     _logger.addHandler(_log_handler)
@@ -125,17 +126,35 @@ class DocumentResponse(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
 
 
+class SafetyInfo(BaseModel):
+    """Content safety metadata when a response is blocked."""
+    strategy: str
+    message: str
+    detail: Optional[str] = None
+
+
+class GroundednessInfo(BaseModel):
+    """Groundedness warning metadata."""
+    ungrounded_pct: float
+    message: str
+
+
 class SearchResult(BaseModel):
     answer: str
     documents: List[DocumentResponse]
     query: str
+    safety: Optional[SafetyInfo] = None
+    groundedness: Optional[GroundednessInfo] = None
 
 
 class AskResponse(BaseModel):
     answer: str
     sources: List[str]  # Document IDs
+    safety: Optional[SafetyInfo] = None
+    groundedness: Optional[GroundednessInfo] = None
 
 
+<<<<<<< HEAD
 class RegenerateRequest(BaseModel):
     query: str
     rejected_answer: str
@@ -144,12 +163,19 @@ class RegenerateRequest(BaseModel):
 class RegenerateResult(BaseModel):
     answer: str
 
+=======
+class RejectedFile(BaseModel):
+    """A file rejected by content safety moderation."""
+    filename: str
+    message: str
+>>>>>>> origin/main
 
 class UploadAndProcessResponse(BaseModel):
     """Response for combined upload and process endpoint."""
     uploaded: List[Dict[str, Any]]
     count: int
     message: str
+    rejected: List[RejectedFile] = []
 
 
 # Endpoints
@@ -201,14 +227,23 @@ async def upload_images(
     Use this for testing or if frontend prefers server-side upload.
     """
     uploaded = []
+    rejected = []
 
     for file in files:
         content = await file.read()
+
+        # ── Content Safety: image moderation ──
+        gate_result = await moderate_image(content)
+        if not gate_result.is_safe:
+            logger.warning("Image rejected for %s: %s", file.filename, gate_result.message)
+            rejected.append({"filename": file.filename, "message": gate_result.message})
+            continue
+
         s3_key = await upload_to_s3(content, user_id, file.filename)
         doc_id = await create_document(db, user_id, s3_key)
         uploaded.append({"doc_id": doc_id, "s3_key": s3_key, "filename": file.filename})
 
-    return {"uploaded": uploaded, "count": len(uploaded)}
+    return {"uploaded": uploaded, "count": len(uploaded), "rejected": rejected}
 
 
 @app.post("/uploadAndProcess", response_model=UploadAndProcessResponse)
@@ -224,10 +259,19 @@ async def upload_and_process(
     Supports multiple files with safe concurrency (configurable via MAX_CONCURRENT_OCR).
     """
     uploaded = []
+    rejected = []
 
     for file in files:
         # Upload to S3
         content = await file.read()
+
+        # ── Content Safety: image moderation ──
+        gate_result = await moderate_image(content)
+        if not gate_result.is_safe:
+            logger.warning("Image rejected for %s: %s", file.filename, gate_result.message)
+            rejected.append(RejectedFile(filename=file.filename, message=gate_result.message))
+            continue
+
         s3_key = await upload_to_s3(content, user_id, file.filename)
 
         # Create DB record
@@ -246,7 +290,8 @@ async def upload_and_process(
     return UploadAndProcessResponse(
         uploaded=uploaded,
         count=len(uploaded),
-        message=f"Uploaded and started processing {len(uploaded)} file(s)"
+        message=f"Uploaded and started processing {len(uploaded)} file(s)",
+        rejected=rejected,
     )
 
 
@@ -282,10 +327,20 @@ async def search(
             metadata=doc.get("metadata"),
         ))
 
+    safety = None
+    if agent_result.get("safety"):
+        safety = SafetyInfo(**agent_result["safety"])
+
+    groundedness = None
+    if agent_result.get("groundedness"):
+        groundedness = GroundednessInfo(**agent_result["groundedness"])
+
     return SearchResult(
         answer=agent_result["answer"],
         documents=frontend_docs,
         query=request.query,
+        safety=safety,
+        groundedness=groundedness,
     )
 
 
@@ -435,6 +490,12 @@ async def review_document(
     if len(request.note) > 500:
         raise HTTPException(status_code=400, detail="Note must be 500 characters or less")
 
+    # ── Content Safety: moderate review note ──
+    if request.note.strip():
+        gate_result = await moderate_user_text(request.note)
+        if not gate_result.is_safe:
+            raise HTTPException(status_code=400, detail=gate_result.message)
+
     # Get document and verify ownership
     doc = await get_document_by_id(db, int(doc_id), user_id)
     if not doc:
@@ -520,7 +581,21 @@ async def ask_question(
 ):
     """Ask analytical questions about documents using the agent."""
     result = await ask_agent(db, user_id, request.question)
-    return AskResponse(answer=result["answer"], sources=[str(s) for s in result["sources"]])
+
+    safety = None
+    if result.get("safety"):
+        safety = SafetyInfo(**result["safety"])
+
+    groundedness = None
+    if result.get("groundedness"):
+        groundedness = GroundednessInfo(**result["groundedness"])
+
+    return AskResponse(
+        answer=result["answer"],
+        sources=[str(s) for s in result["sources"]],
+        safety=safety,
+        groundedness=groundedness,
+    )
 
 
 @app.post("/internal/crawl-radar")

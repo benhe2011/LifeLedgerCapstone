@@ -1,5 +1,6 @@
 """VLM-driven agent with tool calling for document analysis."""
 import json
+import logging
 import os
 from typing import Dict, Any, List
 from datetime import date
@@ -13,6 +14,14 @@ from app.extraction import (
     get_receipts_by_merchant,
     get_receipts_by_date_range,
 )
+from app.content_safety import (
+    shield_agent_prompt,
+    moderate_output_text,
+    check_groundedness,
+    check_task_adherence,
+)
+
+logger = logging.getLogger(__name__)
 
 # Agent configuration (env-configurable)
 AGENT_TEMPERATURE = float(os.getenv("AGENT_TEMPERATURE", "0.3"))
@@ -157,6 +166,19 @@ async def execute_tool(db, user_id: str, tool_call) -> str:
 
 async def ask_agent(db, user_id: str, question: str) -> Dict[str, Any]:
     """VLM-driven agent with tool calling. Supports configurable retries."""
+    # ── Content Safety: check user question ──
+    gate_result = await shield_agent_prompt(question)
+    if not gate_result.is_safe:
+        return {
+            "answer": gate_result.message,
+            "sources": [],
+            "safety": {
+                "strategy": gate_result.strategy.value if gate_result.strategy else None,
+                "message": gate_result.message,
+                "detail": gate_result.detail,
+            },
+        }
+
     for attempt in range(AGENT_MAX_RETRIES + 1):
         try:
             return await _ask_agent_impl(db, user_id, question)
@@ -199,6 +221,15 @@ async def _ask_agent_impl(db, user_id: str, question: str) -> Dict[str, Any]:
         messages.append(msg)  # Add assistant message to history
 
         if msg.tool_calls:
+            # ── Content Safety: task adherence check (advisory) ──
+            task_risk = await check_task_adherence(TOOLS, messages)
+            if task_risk is True:
+                logger.warning(
+                    "Task adherence risk for user=%s, tool_calls=%s",
+                    user_id,
+                    [tc.function.name for tc in msg.tool_calls],
+                )
+
             # Execute each tool call
             for tool_call in msg.tool_calls:
                 result = await execute_tool(db, user_id, tool_call)
@@ -220,10 +251,55 @@ async def _ask_agent_impl(db, user_id: str, question: str) -> Dict[str, Any]:
                     pass
         else:
             # No more tool calls - this is the final answer
-            return {
-                "answer": msg.content or "I couldn't find relevant information.",
-                "sources": list(set(sources))  # Dedupe
+            final_answer = msg.content or "I couldn't find relevant information."
+
+            # ── Content Safety: moderate output text ──
+            gate_result = await moderate_output_text(final_answer)
+            if not gate_result.is_safe:
+                return {
+                    "answer": gate_result.message,
+                    "sources": list(set(sources)),
+                    "safety": {
+                        "strategy": gate_result.strategy.value if gate_result.strategy else None,
+                        "message": gate_result.message,
+                        "detail": gate_result.detail,
+                    },
+                }
+
+            # ── Content Safety: groundedness check ──
+            grounding_sources = []
+            for m in messages:
+                if isinstance(m, dict) and m.get("role") == "tool":
+                    content = m.get("content", "")
+                    if content:
+                        grounding_sources.append(content)
+
+            groundedness_info = None
+            if grounding_sources:
+                ground_result = await check_groundedness(
+                    question, final_answer, grounding_sources
+                )
+                if ground_result and ground_result.get("ungrounded_detected"):
+                    pct = ground_result.get("ungrounded_percentage", 0)
+                    if pct > 50:
+                        groundedness_info = {
+                            "ungrounded_pct": pct,
+                            "message": (
+                                "Some parts of this response may not be "
+                                "fully supported by your documents."
+                            ),
+                        }
+                        logger.info(
+                            "Groundedness warning: %.1f%% ungrounded", pct
+                        )
+
+            result = {
+                "answer": final_answer,
+                "sources": list(set(sources)),
             }
+            if groundedness_info:
+                result["groundedness"] = groundedness_info
+            return result
 
     # Max iterations reached
     return {
