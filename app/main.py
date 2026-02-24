@@ -154,7 +154,6 @@ class AskResponse(BaseModel):
     groundedness: Optional[GroundednessInfo] = None
 
 
-<<<<<<< HEAD
 class RegenerateRequest(BaseModel):
     query: str
     rejected_answer: str
@@ -162,13 +161,13 @@ class RegenerateRequest(BaseModel):
 
 class RegenerateResult(BaseModel):
     answer: str
+    safety: Optional[SafetyInfo] = None
+    groundedness: Optional[GroundednessInfo] = None
 
-=======
 class RejectedFile(BaseModel):
     """A file rejected by content safety moderation."""
     filename: str
     message: str
->>>>>>> origin/main
 
 class UploadAndProcessResponse(BaseModel):
     """Response for combined upload and process endpoint."""
@@ -353,7 +352,20 @@ async def regenerate(
     """Regenerate AI answer and log the rejected one for quality tracking."""
     await log_regenerate(db, user_id, request.query, request.rejected_answer)
     agent_result = await ask_agent(db, user_id, request.query)
-    return RegenerateResult(answer=agent_result["answer"])
+
+    safety = None
+    if agent_result.get("safety"):
+        safety = SafetyInfo(**agent_result["safety"])
+
+    groundedness = None
+    if agent_result.get("groundedness"):
+        groundedness = GroundednessInfo(**agent_result["groundedness"])
+
+    return RegenerateResult(
+        answer=agent_result["answer"],
+        safety=safety,
+        groundedness=groundedness,
+    )
 
 
 @app.get("/documents")
