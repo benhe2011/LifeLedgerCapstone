@@ -126,22 +126,45 @@ class DocumentResponse(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
 
 
+class SafetyInfo(BaseModel):
+    """Content safety metadata when a response is blocked."""
+    strategy: str
+    message: str
+    detail: Optional[str] = None
+
+
+class GroundednessInfo(BaseModel):
+    """Groundedness warning metadata."""
+    ungrounded_pct: float
+    message: str
+
+
 class SearchResult(BaseModel):
     answer: str
     documents: List[DocumentResponse]
     query: str
+    safety: Optional[SafetyInfo] = None
+    groundedness: Optional[GroundednessInfo] = None
 
 
 class AskResponse(BaseModel):
     answer: str
     sources: List[str]  # Document IDs
+    safety: Optional[SafetyInfo] = None
+    groundedness: Optional[GroundednessInfo] = None
 
+
+class RejectedFile(BaseModel):
+    """A file rejected by content safety moderation."""
+    filename: str
+    message: str
 
 class UploadAndProcessResponse(BaseModel):
     """Response for combined upload and process endpoint."""
     uploaded: List[Dict[str, Any]]
     count: int
     message: str
+    rejected: List[RejectedFile] = []
 
 
 # Endpoints
@@ -193,21 +216,23 @@ async def upload_images(
     Use this for testing or if frontend prefers server-side upload.
     """
     uploaded = []
+    rejected = []
 
     for file in files:
         content = await file.read()
 
         # ── Content Safety: image moderation ──
-        img_safe, img_msg = await moderate_image(content)
-        if not img_safe:
-            logger.warning("Image rejected for %s: %s", file.filename, img_msg)
+        gate_result = await moderate_image(content)
+        if not gate_result.is_safe:
+            logger.warning("Image rejected for %s: %s", file.filename, gate_result.message)
+            rejected.append({"filename": file.filename, "message": gate_result.message})
             continue
 
         s3_key = await upload_to_s3(content, user_id, file.filename)
         doc_id = await create_document(db, user_id, s3_key)
         uploaded.append({"doc_id": doc_id, "s3_key": s3_key, "filename": file.filename})
 
-    return {"uploaded": uploaded, "count": len(uploaded)}
+    return {"uploaded": uploaded, "count": len(uploaded), "rejected": rejected}
 
 
 @app.post("/uploadAndProcess", response_model=UploadAndProcessResponse)
@@ -223,15 +248,17 @@ async def upload_and_process(
     Supports multiple files with safe concurrency (configurable via MAX_CONCURRENT_OCR).
     """
     uploaded = []
+    rejected = []
 
     for file in files:
         # Upload to S3
         content = await file.read()
 
         # ── Content Safety: image moderation ──
-        img_safe, img_msg = await moderate_image(content)
-        if not img_safe:
-            logger.warning("Image rejected for %s: %s", file.filename, img_msg)
+        gate_result = await moderate_image(content)
+        if not gate_result.is_safe:
+            logger.warning("Image rejected for %s: %s", file.filename, gate_result.message)
+            rejected.append(RejectedFile(filename=file.filename, message=gate_result.message))
             continue
 
         s3_key = await upload_to_s3(content, user_id, file.filename)
@@ -252,7 +279,8 @@ async def upload_and_process(
     return UploadAndProcessResponse(
         uploaded=uploaded,
         count=len(uploaded),
-        message=f"Uploaded and started processing {len(uploaded)} file(s)"
+        message=f"Uploaded and started processing {len(uploaded)} file(s)",
+        rejected=rejected,
     )
 
 
@@ -288,10 +316,20 @@ async def search(
             metadata=doc.get("metadata"),
         ))
 
+    safety = None
+    if agent_result.get("safety"):
+        safety = SafetyInfo(**agent_result["safety"])
+
+    groundedness = None
+    if agent_result.get("groundedness"):
+        groundedness = GroundednessInfo(**agent_result["groundedness"])
+
     return SearchResult(
         answer=agent_result["answer"],
         documents=frontend_docs,
         query=request.query,
+        safety=safety,
+        groundedness=groundedness,
     )
 
 
@@ -431,9 +469,9 @@ async def review_document(
 
     # ── Content Safety: moderate review note ──
     if request.note.strip():
-        note_safe, note_msg = await moderate_user_text(request.note)
-        if not note_safe:
-            raise HTTPException(status_code=400, detail=note_msg)
+        gate_result = await moderate_user_text(request.note)
+        if not gate_result.is_safe:
+            raise HTTPException(status_code=400, detail=gate_result.message)
 
     # Get document and verify ownership
     doc = await get_document_by_id(db, int(doc_id), user_id)
@@ -520,7 +558,21 @@ async def ask_question(
 ):
     """Ask analytical questions about documents using the agent."""
     result = await ask_agent(db, user_id, request.question)
-    return AskResponse(answer=result["answer"], sources=[str(s) for s in result["sources"]])
+
+    safety = None
+    if result.get("safety"):
+        safety = SafetyInfo(**result["safety"])
+
+    groundedness = None
+    if result.get("groundedness"):
+        groundedness = GroundednessInfo(**result["groundedness"])
+
+    return AskResponse(
+        answer=result["answer"],
+        sources=[str(s) for s in result["sources"]],
+        safety=safety,
+        groundedness=groundedness,
+    )
 
 
 @app.post("/internal/crawl-radar")

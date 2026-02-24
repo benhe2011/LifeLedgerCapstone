@@ -54,6 +54,15 @@ class Action(str, Enum):
     REJECT = "Reject"
 
 
+class ResponseStrategy(str, Enum):
+    """How to respond when content is flagged."""
+    ALLOW = "ALLOW"
+    ASK_CLARIFY_SAFE = "ASK_CLARIFY_SAFE"
+    DEESCALATE_SUPPORT = "DEESCALATE_SUPPORT"
+    REFUSE_REDIRECT = "REFUSE_REDIRECT"
+    REFUSE_ONLY = "REFUSE_ONLY"
+
+
 @dataclass
 class SafetyResult:
     """Result of a content safety check."""
@@ -64,6 +73,164 @@ class SafetyResult:
     @property
     def is_rejected(self) -> bool:
         return self.action == Action.REJECT
+
+
+@dataclass
+class SafetyGateResult:
+    """Result from a safety gate (input or output)."""
+    is_safe: bool
+    strategy: Optional[ResponseStrategy] = None
+    message: str = ""
+    detail: Optional[str] = None
+    category: Optional[str] = None
+
+
+# ── Strategy grid & messages ─────────────────────────────────
+
+# Maps (category, severity) -> ResponseStrategy.
+# Severity values are Azure FourSeverityLevels: 0, 2, 4, 6.
+_STRATEGY_GRID: Dict[str, Dict[int, ResponseStrategy]] = {
+    Category.HATE: {
+        0: ResponseStrategy.ALLOW,
+        2: ResponseStrategy.ASK_CLARIFY_SAFE,
+        4: ResponseStrategy.REFUSE_REDIRECT,
+        6: ResponseStrategy.REFUSE_ONLY,
+    },
+    Category.SELF_HARM: {
+        0: ResponseStrategy.ALLOW,
+        2: ResponseStrategy.DEESCALATE_SUPPORT,
+        4: ResponseStrategy.DEESCALATE_SUPPORT,
+        6: ResponseStrategy.DEESCALATE_SUPPORT,
+    },
+    Category.SEXUAL: {
+        0: ResponseStrategy.ALLOW,
+        2: ResponseStrategy.ASK_CLARIFY_SAFE,
+        4: ResponseStrategy.REFUSE_REDIRECT,
+        6: ResponseStrategy.REFUSE_ONLY,
+    },
+    Category.VIOLENCE: {
+        0: ResponseStrategy.ALLOW,
+        2: ResponseStrategy.ASK_CLARIFY_SAFE,
+        4: ResponseStrategy.REFUSE_REDIRECT,
+        6: ResponseStrategy.REFUSE_ONLY,
+    },
+}
+
+# Priority order for resolving conflicts when multiple categories flag.
+_STRATEGY_PRIORITY = [
+    ResponseStrategy.REFUSE_ONLY,
+    ResponseStrategy.DEESCALATE_SUPPORT,
+    ResponseStrategy.REFUSE_REDIRECT,
+    ResponseStrategy.ASK_CLARIFY_SAFE,
+]
+
+_DEESCALATE_DETAIL = (
+    "988 Suicide & Crisis Lifeline: call or text 988 | "
+    "Crisis Text Line: text HOME to 741741"
+)
+
+_INPUT_MESSAGES: Dict[ResponseStrategy, str] = {
+    ResponseStrategy.REFUSE_ONLY: "Your question could not be processed.",
+    ResponseStrategy.REFUSE_REDIRECT: (
+        "Your question was flagged for safety reasons. "
+        "You can ask me about your documents, spending, receipts, "
+        "or upcoming deadlines."
+    ),
+    ResponseStrategy.DEESCALATE_SUPPORT: (
+        "It sounds like you might be going through a difficult time. "
+        "If you or someone you know is in crisis, please reach out:\n"
+        "- 988 Suicide & Crisis Lifeline: call or text 988\n"
+        "- Crisis Text Line: text HOME to 741741\n\n"
+        "I'm here to help with your documents and finances whenever "
+        "you're ready."
+    ),
+    ResponseStrategy.ASK_CLARIFY_SAFE: (
+        "Your question was flagged for review. "
+        "Could you rephrase it in a different way?"
+    ),
+}
+
+_OUTPUT_MESSAGES: Dict[ResponseStrategy, str] = {
+    ResponseStrategy.REFUSE_ONLY: "I'm unable to provide that response.",
+    ResponseStrategy.REFUSE_REDIRECT: (
+        "I couldn't generate an appropriate response. "
+        "Try asking about your documents, spending, receipts, "
+        "or upcoming deadlines."
+    ),
+    ResponseStrategy.DEESCALATE_SUPPORT: (
+        "I want to be careful with this topic. "
+        "If you or someone you know needs support:\n"
+        "- 988 Suicide & Crisis Lifeline: call or text 988\n"
+        "- Crisis Text Line: text HOME to 741741"
+    ),
+    ResponseStrategy.ASK_CLARIFY_SAFE: (
+        "I had trouble generating a safe response. "
+        "Could you try asking differently?"
+    ),
+}
+
+_IMAGE_MESSAGES: Dict[ResponseStrategy, str] = {
+    ResponseStrategy.REFUSE_ONLY: (
+        "This image could not be uploaded."
+    ),
+    ResponseStrategy.REFUSE_REDIRECT: (
+        "This image was flagged for safety reasons and cannot be uploaded."
+    ),
+    ResponseStrategy.DEESCALATE_SUPPORT: (
+        "This image was flagged and cannot be uploaded. "
+        "If you or someone you know needs support:\n"
+        "- 988 Suicide & Crisis Lifeline: call or text 988\n"
+        "- Crisis Text Line: text HOME to 741741"
+    ),
+    ResponseStrategy.ASK_CLARIFY_SAFE: (
+        "This image was flagged for review and cannot be uploaded. "
+        "Try uploading a different image."
+    ),
+}
+
+_STRATEGY_DETAILS: Dict[ResponseStrategy, Optional[str]] = {
+    ResponseStrategy.REFUSE_ONLY: None,
+    ResponseStrategy.REFUSE_REDIRECT: (
+        "You can ask me about your documents, spending, receipts, "
+        "or upcoming deadlines."
+    ),
+    ResponseStrategy.DEESCALATE_SUPPORT: _DEESCALATE_DETAIL,
+    ResponseStrategy.ASK_CLARIFY_SAFE: None,
+}
+
+
+def _resolve_strategy(
+    safety_result: SafetyResult,
+) -> Tuple[ResponseStrategy, str]:
+    """Pick the highest-priority strategy from a rejected SafetyResult.
+
+    When multiple categories are flagged, the most severe strategy wins.
+    Returns (strategy, triggering_category_name).
+    """
+    best_strategy = ResponseStrategy.REFUSE_ONLY
+    best_priority = 0
+    trigger_category = "Unknown"
+
+    for cat_name, severity in safety_result.categories.items():
+        grid = _STRATEGY_GRID.get(cat_name, {})
+        # Snap to nearest valid severity level
+        valid_levels = sorted(grid.keys())
+        snapped = min(valid_levels, key=lambda s: abs(s - severity)) if valid_levels else 6
+        strategy = grid.get(snapped, ResponseStrategy.REFUSE_ONLY)
+        if strategy == ResponseStrategy.ALLOW:
+            continue
+
+        try:
+            priority = len(_STRATEGY_PRIORITY) - _STRATEGY_PRIORITY.index(strategy)
+        except ValueError:
+            priority = 0
+
+        if priority > best_priority:
+            best_priority = priority
+            best_strategy = strategy
+            trigger_category = cat_name
+
+    return best_strategy, trigger_category
 
 
 # ── Shared HTTP helper ────────────────────────────────────────
@@ -343,58 +510,84 @@ async def check_task_adherence(
 
 # ── Convenience wrappers ──────────────────────────────────────
 
-async def moderate_user_text(text: str) -> Tuple[bool, str]:
+async def moderate_user_text(text: str) -> SafetyGateResult:
     """Check user-submitted text (questions, notes, search queries).
 
-    Returns (is_safe, message). On API failure, defaults to safe.
+    Returns SafetyGateResult. On API failure, defaults to safe (fail-open).
     """
     result = await check_text(text)
     if result is None:
-        return True, ""
+        return SafetyGateResult(is_safe=True)
     if result.is_rejected:
-        return False, "Your message was flagged for inappropriate content. Please rephrase."
-    return True, ""
+        strategy, category = _resolve_strategy(result)
+        return SafetyGateResult(
+            is_safe=False,
+            strategy=strategy,
+            message=_INPUT_MESSAGES[strategy],
+            detail=_STRATEGY_DETAILS.get(strategy),
+            category=category,
+        )
+    return SafetyGateResult(is_safe=True)
 
 
-async def moderate_output_text(text: str) -> Tuple[bool, str]:
+async def moderate_output_text(text: str) -> SafetyGateResult:
     """Check agent/LLM output text before returning to user.
 
-    Returns (is_safe, message). On API failure, defaults to safe.
+    Returns SafetyGateResult. On API failure, defaults to safe (fail-open).
     """
     result = await check_text(text)
     if result is None:
-        return True, ""
+        return SafetyGateResult(is_safe=True)
     if result.is_rejected:
-        return False, "I'm unable to provide that response. Please try a different question."
-    return True, ""
+        strategy, category = _resolve_strategy(result)
+        return SafetyGateResult(
+            is_safe=False,
+            strategy=strategy,
+            message=_OUTPUT_MESSAGES[strategy],
+            detail=_STRATEGY_DETAILS.get(strategy),
+            category=category,
+        )
+    return SafetyGateResult(is_safe=True)
 
 
-async def moderate_image(image_bytes: bytes) -> Tuple[bool, str]:
+async def moderate_image(image_bytes: bytes) -> SafetyGateResult:
     """Check uploaded image before S3 storage.
 
-    Returns (is_safe, message). On API failure, defaults to safe.
+    Returns SafetyGateResult. On API failure, defaults to safe (fail-open).
     """
     result = await check_image(image_bytes)
     if result is None:
-        return True, ""
+        return SafetyGateResult(is_safe=True)
     if result.is_rejected:
-        return False, "This image was flagged for inappropriate content and cannot be uploaded."
-    return True, ""
+        strategy, category = _resolve_strategy(result)
+        return SafetyGateResult(
+            is_safe=False,
+            strategy=strategy,
+            message=_IMAGE_MESSAGES[strategy],
+            detail=_STRATEGY_DETAILS.get(strategy),
+            category=category,
+        )
+    return SafetyGateResult(is_safe=True)
 
 
-async def shield_agent_prompt(question: str) -> Tuple[bool, str]:
+async def shield_agent_prompt(question: str) -> SafetyGateResult:
     """Run prompt shield + text moderation on user question before agent.
 
-    Returns (is_safe, message). On API failure, defaults to safe.
+    Returns SafetyGateResult. On API failure, defaults to safe (fail-open).
     """
     # 1. Text moderation
-    text_safe, text_msg = await moderate_user_text(question)
-    if not text_safe:
-        return False, text_msg
+    gate_result = await moderate_user_text(question)
+    if not gate_result.is_safe:
+        return gate_result
 
-    # 2. Prompt shield
+    # 2. Prompt shield (binary -> REFUSE_ONLY)
     attack = await check_prompt_shield(question)
     if attack is True:
-        return False, "Your question was flagged as a potential prompt injection. Please rephrase."
+        return SafetyGateResult(
+            is_safe=False,
+            strategy=ResponseStrategy.REFUSE_ONLY,
+            message="Your question was flagged as a potential prompt injection.",
+            category="PromptShield",
+        )
 
-    return True, ""
+    return SafetyGateResult(is_safe=True)

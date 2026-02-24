@@ -167,9 +167,17 @@ async def execute_tool(db, user_id: str, tool_call) -> str:
 async def ask_agent(db, user_id: str, question: str) -> Dict[str, Any]:
     """VLM-driven agent with tool calling. Supports configurable retries."""
     # ── Content Safety: check user question ──
-    is_safe, safety_msg = await shield_agent_prompt(question)
-    if not is_safe:
-        return {"answer": safety_msg, "sources": []}
+    gate_result = await shield_agent_prompt(question)
+    if not gate_result.is_safe:
+        return {
+            "answer": gate_result.message,
+            "sources": [],
+            "safety": {
+                "strategy": gate_result.strategy.value if gate_result.strategy else None,
+                "message": gate_result.message,
+                "detail": gate_result.detail,
+            },
+        }
 
     for attempt in range(AGENT_MAX_RETRIES + 1):
         try:
@@ -246,9 +254,17 @@ async def _ask_agent_impl(db, user_id: str, question: str) -> Dict[str, Any]:
             final_answer = msg.content or "I couldn't find relevant information."
 
             # ── Content Safety: moderate output text ──
-            output_safe, output_msg = await moderate_output_text(final_answer)
-            if not output_safe:
-                return {"answer": output_msg, "sources": list(set(sources))}
+            gate_result = await moderate_output_text(final_answer)
+            if not gate_result.is_safe:
+                return {
+                    "answer": gate_result.message,
+                    "sources": list(set(sources)),
+                    "safety": {
+                        "strategy": gate_result.strategy.value if gate_result.strategy else None,
+                        "message": gate_result.message,
+                        "detail": gate_result.detail,
+                    },
+                }
 
             # ── Content Safety: groundedness check ──
             grounding_sources = []
@@ -258,6 +274,7 @@ async def _ask_agent_impl(db, user_id: str, question: str) -> Dict[str, Any]:
                     if content:
                         grounding_sources.append(content)
 
+            groundedness_info = None
             if grounding_sources:
                 ground_result = await check_groundedness(
                     question, final_answer, grounding_sources
@@ -265,18 +282,24 @@ async def _ask_agent_impl(db, user_id: str, question: str) -> Dict[str, Any]:
                 if ground_result and ground_result.get("ungrounded_detected"):
                     pct = ground_result.get("ungrounded_percentage", 0)
                     if pct > 50:
-                        final_answer += (
-                            "\n\n*Note: Some parts of this response may not be "
-                            "fully supported by your documents.*"
-                        )
+                        groundedness_info = {
+                            "ungrounded_pct": pct,
+                            "message": (
+                                "Some parts of this response may not be "
+                                "fully supported by your documents."
+                            ),
+                        }
                         logger.info(
-                            "Groundedness warning appended: %.1f%% ungrounded", pct
+                            "Groundedness warning: %.1f%% ungrounded", pct
                         )
 
-            return {
+            result = {
                 "answer": final_answer,
-                "sources": list(set(sources))
+                "sources": list(set(sources)),
             }
+            if groundedness_info:
+                result["groundedness"] = groundedness_info
+            return result
 
     # Max iterations reached
     return {
