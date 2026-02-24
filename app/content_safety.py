@@ -169,6 +169,25 @@ _OUTPUT_MESSAGES: Dict[ResponseStrategy, str] = {
     ),
 }
 
+_IMAGE_MESSAGES: Dict[ResponseStrategy, str] = {
+    ResponseStrategy.REFUSE_ONLY: (
+        "This image could not be uploaded."
+    ),
+    ResponseStrategy.REFUSE_REDIRECT: (
+        "This image was flagged for safety reasons and cannot be uploaded."
+    ),
+    ResponseStrategy.DEESCALATE_SUPPORT: (
+        "This image was flagged and cannot be uploaded. "
+        "If you or someone you know needs support:\n"
+        "- 988 Suicide & Crisis Lifeline: call or text 988\n"
+        "- Crisis Text Line: text HOME to 741741"
+    ),
+    ResponseStrategy.ASK_CLARIFY_SAFE: (
+        "This image was flagged for review and cannot be uploaded. "
+        "Try uploading a different image."
+    ),
+}
+
 _STRATEGY_DETAILS: Dict[ResponseStrategy, Optional[str]] = {
     ResponseStrategy.REFUSE_ONLY: None,
     ResponseStrategy.REFUSE_REDIRECT: (
@@ -531,17 +550,24 @@ async def moderate_output_text(text: str) -> SafetyGateResult:
     return SafetyGateResult(is_safe=True)
 
 
-async def moderate_image(image_bytes: bytes) -> Tuple[bool, str]:
+async def moderate_image(image_bytes: bytes) -> SafetyGateResult:
     """Check uploaded image before S3 storage.
 
-    Returns (is_safe, message). On API failure, defaults to safe.
+    Returns SafetyGateResult. On API failure, defaults to safe (fail-open).
     """
     result = await check_image(image_bytes)
     if result is None:
-        return True, ""
+        return SafetyGateResult(is_safe=True)
     if result.is_rejected:
-        return False, "This image was flagged for inappropriate content and cannot be uploaded."
-    return True, ""
+        strategy, category = _resolve_strategy(result)
+        return SafetyGateResult(
+            is_safe=False,
+            strategy=strategy,
+            message=_IMAGE_MESSAGES[strategy],
+            detail=_STRATEGY_DETAILS.get(strategy),
+            category=category,
+        )
+    return SafetyGateResult(is_safe=True)
 
 
 async def shield_agent_prompt(question: str) -> SafetyGateResult:
