@@ -460,6 +460,15 @@ async def log_regenerate_attempt(conn, session_id: int, answer: str, tool_trace:
     return attempt_number
 
 
+async def count_unmined_sessions(conn) -> int:
+    """Count sessions with 2+ attempts that haven't been mined yet."""
+    return await conn.fetchval("""
+        SELECT COUNT(*) FROM regenerate_sessions s
+        WHERE s.mined = FALSE
+          AND (SELECT COUNT(*) FROM regenerate_attempts WHERE session_id = s.id) >= 2
+    """)
+
+
 async def get_unmined_sessions(conn) -> List[Dict[str, Any]]:
     """Get sessions with 2+ attempts that haven't been mined yet."""
     rows = await conn.fetch("""
