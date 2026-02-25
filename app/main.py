@@ -653,6 +653,24 @@ async def trigger_radar_crawl(
     return {"status": "completed", **stats}
 
 
+@app.post("/internal/mine-constraints")
+async def trigger_constraint_mining(
+    user_id: str = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Run the constraint mining batch job.
+
+    Processes unmined regeneration sessions to extract behavioral
+    constraints from rejected/accepted response pairs. Mined constraints
+    are automatically injected into the agent's system prompt.
+
+    Can be triggered manually or via a scheduled job.
+    """
+    from app.prompt_optimizer import run_mining_job
+    stats = await run_mining_job(db)
+    return {"status": "completed", **stats}
+
+
 # Helper functions for frontend format conversion
 def _get_status(doc: dict) -> str:
     """Determine document status from doc_text."""
