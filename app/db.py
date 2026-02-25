@@ -98,13 +98,22 @@ async def create_tables():
             )
         """)
 
-        # Create regenerate_events table (tracks rejected AI answers)
+        # Feedback loop tables: track agent responses across regeneration sessions
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS regenerate_events (
+            CREATE TABLE IF NOT EXISTS regenerate_sessions (
                 id SERIAL PRIMARY KEY,
                 user_id TEXT NOT NULL,
                 query_text TEXT NOT NULL,
-                rejected_answer TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS regenerate_attempts (
+                id SERIAL PRIMARY KEY,
+                session_id INTEGER NOT NULL REFERENCES regenerate_sessions(id),
+                attempt_number INTEGER NOT NULL,
+                answer TEXT NOT NULL,
+                tool_trace JSONB,
                 created_at TIMESTAMP DEFAULT NOW()
             )
         """)
@@ -391,12 +400,40 @@ async def delete_document_records(
     )
 
 
-async def log_regenerate(conn, user_id: str, query_text: str, rejected_answer: str) -> None:
-    """Log a rejected AI answer when user clicks regenerate."""
+async def create_regenerate_session(conn, user_id: str, query_text: str, answer: str, tool_trace: list) -> int:
+    """Create a new regenerate session and log the initial (attempt 0) response.
+
+    Called by /search to start tracking. Returns the session_id.
+    """
+    session_id = await conn.fetchval(
+        """
+        INSERT INTO regenerate_sessions (user_id, query_text)
+        VALUES ($1, $2)
+        RETURNING id
+        """,
+        user_id, query_text,
+    )
     await conn.execute(
         """
-        INSERT INTO regenerate_events (user_id, query_text, rejected_answer)
-        VALUES ($1, $2, $3)
+        INSERT INTO regenerate_attempts (session_id, attempt_number, answer, tool_trace)
+        VALUES ($1, 0, $2, $3::jsonb)
         """,
-        user_id, query_text, rejected_answer,
+        session_id, answer, json.dumps(tool_trace),
     )
+    return session_id
+
+
+async def log_regenerate_attempt(conn, session_id: int, answer: str, tool_trace: list) -> int:
+    """Log a regeneration attempt for an existing session.
+
+    Auto-increments attempt_number. Returns the new attempt number.
+    """
+    attempt_number = await conn.fetchval(
+        """
+        INSERT INTO regenerate_attempts (session_id, attempt_number, answer, tool_trace)
+        VALUES ($1, (SELECT COALESCE(MAX(attempt_number), -1) + 1 FROM regenerate_attempts WHERE session_id = $1), $2, $3::jsonb)
+        RETURNING attempt_number
+        """,
+        session_id, answer, json.dumps(tool_trace),
+    )
+    return attempt_number

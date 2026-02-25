@@ -172,6 +172,7 @@ async def ask_agent(db, user_id: str, question: str) -> Dict[str, Any]:
         return {
             "answer": gate_result.message,
             "sources": [],
+            "tool_trace": [],
             "safety": {
                 "strategy": gate_result.strategy.value if gate_result.strategy else None,
                 "message": gate_result.message,
@@ -186,7 +187,8 @@ async def ask_agent(db, user_id: str, question: str) -> Dict[str, Any]:
             if attempt == AGENT_MAX_RETRIES:
                 return {
                     "answer": "Sorry, I had trouble processing that. Please try again.",
-                    "sources": []
+                    "sources": [],
+                    "tool_trace": [],
                 }
             continue
 
@@ -206,6 +208,7 @@ async def _ask_agent_impl(db, user_id: str, question: str) -> Dict[str, Any]:
     ]
 
     sources = []
+    tool_trace = []  # Compact trace for feedback loop: [{tool, args, result_summary, task_adherence_risk}]
 
     # Loop: VLM calls tools until it produces final answer
     for _ in range(5):  # Max 5 iterations to prevent infinite loops
@@ -238,6 +241,19 @@ async def _ask_agent_impl(db, user_id: str, question: str) -> Dict[str, Any]:
                     "tool_call_id": tool_call.id,
                     "content": result
                 })
+
+                # Build compact trace entry
+                try:
+                    args = json.loads(tool_call.function.arguments)
+                except json.JSONDecodeError:
+                    args = tool_call.function.arguments
+                tool_trace.append({
+                    "tool": tool_call.function.name,
+                    "args": args,
+                    "result_summary": result[:500],
+                    "task_adherence_risk": task_risk if task_risk is not None else False,
+                })
+
                 # Track doc_ids as sources
                 try:
                     data = json.loads(result)
@@ -259,6 +275,7 @@ async def _ask_agent_impl(db, user_id: str, question: str) -> Dict[str, Any]:
                 return {
                     "answer": gate_result.message,
                     "sources": list(set(sources)),
+                    "tool_trace": tool_trace,
                     "safety": {
                         "strategy": gate_result.strategy.value if gate_result.strategy else None,
                         "message": gate_result.message,
@@ -296,6 +313,7 @@ async def _ask_agent_impl(db, user_id: str, question: str) -> Dict[str, Any]:
             result = {
                 "answer": final_answer,
                 "sources": list(set(sources)),
+                "tool_trace": tool_trace,
             }
             if groundedness_info:
                 result["groundedness"] = groundedness_info
@@ -304,5 +322,6 @@ async def _ask_agent_impl(db, user_id: str, question: str) -> Dict[str, Any]:
     # Max iterations reached
     return {
         "answer": "I wasn't able to complete the analysis. Please try a simpler question.",
-        "sources": list(set(sources))
+        "sources": list(set(sources)),
+        "tool_trace": tool_trace,
     }
