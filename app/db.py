@@ -98,13 +98,39 @@ async def create_tables():
             )
         """)
 
-        # Create regenerate_events table (tracks rejected AI answers)
+        # Feedback loop tables: track agent responses across regeneration sessions
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS regenerate_events (
+            CREATE TABLE IF NOT EXISTS regenerate_sessions (
                 id SERIAL PRIMARY KEY,
                 user_id TEXT NOT NULL,
                 query_text TEXT NOT NULL,
-                rejected_answer TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS regenerate_attempts (
+                id SERIAL PRIMARY KEY,
+                session_id INTEGER NOT NULL REFERENCES regenerate_sessions(id),
+                attempt_number INTEGER NOT NULL,
+                answer TEXT NOT NULL,
+                tool_trace JSONB,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+
+        # Track which sessions have been mined for constraints
+        await conn.execute("""
+            ALTER TABLE regenerate_sessions ADD COLUMN IF NOT EXISTS mined BOOLEAN DEFAULT FALSE
+        """)
+
+        # Mined prompt constraints from feedback loop
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS prompt_constraints (
+                id SERIAL PRIMARY KEY,
+                rule_text TEXT NOT NULL,
+                rule_type TEXT NOT NULL,
+                source_session_ids INTEGER[],
+                active BOOLEAN DEFAULT TRUE,
                 created_at TIMESTAMP DEFAULT NOW()
             )
         """)
@@ -391,12 +417,103 @@ async def delete_document_records(
     )
 
 
-async def log_regenerate(conn, user_id: str, query_text: str, rejected_answer: str) -> None:
-    """Log a rejected AI answer when user clicks regenerate."""
+async def create_regenerate_session(conn, user_id: str, query_text: str, answer: str, tool_trace: list) -> int:
+    """Create a new regenerate session and log the initial (attempt 0) response.
+
+    Called by /search to start tracking. Returns the session_id.
+    """
+    session_id = await conn.fetchval(
+        """
+        INSERT INTO regenerate_sessions (user_id, query_text)
+        VALUES ($1, $2)
+        RETURNING id
+        """,
+        user_id, query_text,
+    )
     await conn.execute(
         """
-        INSERT INTO regenerate_events (user_id, query_text, rejected_answer)
-        VALUES ($1, $2, $3)
+        INSERT INTO regenerate_attempts (session_id, attempt_number, answer, tool_trace)
+        VALUES ($1, 0, $2, $3::jsonb)
         """,
-        user_id, query_text, rejected_answer,
+        session_id, answer, json.dumps(tool_trace),
     )
+    return session_id
+
+
+async def log_regenerate_attempt(conn, session_id: int, answer: str, tool_trace: list) -> int:
+    """Log a regeneration attempt for an existing session.
+
+    Auto-increments attempt_number. Returns the new attempt number.
+    """
+    attempt_number = await conn.fetchval(
+        """
+        INSERT INTO regenerate_attempts (session_id, attempt_number, answer, tool_trace)
+        VALUES ($1, (SELECT COALESCE(MAX(attempt_number), -1) + 1 FROM regenerate_attempts WHERE session_id = $1), $2, $3::jsonb)
+        RETURNING attempt_number
+        """,
+        session_id, answer, json.dumps(tool_trace),
+    )
+    return attempt_number
+
+
+async def get_unmined_sessions(conn) -> List[Dict[str, Any]]:
+    """Get sessions with 2+ attempts that haven't been mined yet."""
+    rows = await conn.fetch("""
+        SELECT s.id, s.query_text
+        FROM regenerate_sessions s
+        WHERE s.mined = FALSE
+          AND (SELECT COUNT(*) FROM regenerate_attempts WHERE session_id = s.id) >= 2
+        ORDER BY s.created_at
+    """)
+    return [{"id": row["id"], "query_text": row["query_text"]} for row in rows]
+
+
+async def get_session_attempts(conn, session_id: int) -> List[Dict[str, Any]]:
+    """Get all attempts for a session, ordered by attempt number."""
+    rows = await conn.fetch("""
+        SELECT attempt_number, answer, tool_trace
+        FROM regenerate_attempts
+        WHERE session_id = $1
+        ORDER BY attempt_number
+    """, session_id)
+    return [
+        {
+            "attempt_number": row["attempt_number"],
+            "answer": row["answer"],
+            "tool_trace": json.loads(row["tool_trace"]) if row["tool_trace"] else [],
+        }
+        for row in rows
+    ]
+
+
+async def save_prompt_constraints(conn, constraints: List[Dict[str, Any]], session_ids: List[int]) -> int:
+    """Save mined constraints and mark sessions as mined. Returns count saved."""
+    count = 0
+    for c in constraints:
+        await conn.execute(
+            """
+            INSERT INTO prompt_constraints (rule_text, rule_type, source_session_ids)
+            VALUES ($1, $2, $3)
+            """,
+            c["rule"], c["type"], session_ids,
+        )
+        count += 1
+
+    # Mark sessions as mined
+    if session_ids:
+        await conn.execute(
+            "UPDATE regenerate_sessions SET mined = TRUE WHERE id = ANY($1::int[])",
+            session_ids,
+        )
+    return count
+
+
+async def get_active_constraints(conn) -> List[Dict[str, Any]]:
+    """Get all active prompt constraints, ordered by creation time."""
+    rows = await conn.fetch("""
+        SELECT rule_text, rule_type
+        FROM prompt_constraints
+        WHERE active = TRUE
+        ORDER BY created_at
+    """)
+    return [{"rule": row["rule_text"], "type": row["rule_type"]} for row in rows]

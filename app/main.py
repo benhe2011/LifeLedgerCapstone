@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from app.auth import get_current_user
 from app.s3 import upload_to_s3, generate_presigned_url, download_from_s3, delete_many_from_s3
-from app.db import get_db, create_tables, create_document, search_documents, get_user_documents, get_document_by_id, update_document, get_documents_for_delete, delete_document_records, get_upcoming_events, get_similar_documents, log_regenerate
+from app.db import get_db, create_tables, create_document, search_documents, get_user_documents, get_document_by_id, update_document, get_documents_for_delete, delete_document_records, get_upcoming_events, get_similar_documents, create_regenerate_session, log_regenerate_attempt
 from app.ocr_pipeline import process_image, process_batch_and_crawl
 from app.agent import ask_agent
 from app.radar_crawler import crawl_documents
@@ -145,6 +145,7 @@ class SearchResult(BaseModel):
     answer: str
     documents: List[DocumentResponse]
     query: str
+    session_id: int  # Feedback loop session ID for regeneration tracking
     safety: Optional[SafetyInfo] = None
     groundedness: Optional[GroundednessInfo] = None
 
@@ -157,8 +158,7 @@ class AskResponse(BaseModel):
 
 
 class RegenerateRequest(BaseModel):
-    query: str
-    rejected_answer: str
+    session_id: int
 
 
 class RegenerateResult(BaseModel):
@@ -312,6 +312,13 @@ async def search(
     # Generate agent answer
     agent_result = await ask_agent(db, user_id, request.query)
 
+    # Create feedback loop session (attempt 0 = initial search response)
+    session_id = await create_regenerate_session(
+        db, user_id, request.query,
+        agent_result["answer"],
+        agent_result.get("tool_trace", []),
+    )
+
     # Transform to frontend Document format
     frontend_docs = []
     for doc in docs:
@@ -340,6 +347,7 @@ async def search(
         answer=agent_result["answer"],
         documents=frontend_docs,
         query=request.query,
+        session_id=session_id,
         safety=safety,
         groundedness=groundedness,
     )
@@ -351,9 +359,23 @@ async def regenerate(
     user_id: str = Depends(get_current_user),
     db=Depends(get_db),
 ):
-    """Regenerate AI answer and log the rejected one for quality tracking."""
-    await log_regenerate(db, user_id, request.query, request.rejected_answer)
-    agent_result = await ask_agent(db, user_id, request.query)
+    """Regenerate AI answer and log the attempt for the feedback loop."""
+    # Look up the original query from the session
+    session = await db.fetchrow(
+        "SELECT query_text FROM regenerate_sessions WHERE id = $1 AND user_id = $2",
+        request.session_id, user_id,
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    agent_result = await ask_agent(db, user_id, session["query_text"])
+
+    # Log this attempt
+    await log_regenerate_attempt(
+        db, request.session_id,
+        agent_result["answer"],
+        agent_result.get("tool_trace", []),
+    )
 
     safety = None
     if agent_result.get("safety"):
@@ -628,6 +650,24 @@ async def trigger_radar_crawl(
     Can also be called via cron for background processing.
     """
     stats = await crawl_documents(user_id=user_id, limit=limit)
+    return {"status": "completed", **stats}
+
+
+@app.post("/internal/mine-constraints")
+async def trigger_constraint_mining(
+    user_id: str = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Run the constraint mining batch job.
+
+    Processes unmined regeneration sessions to extract behavioral
+    constraints from rejected/accepted response pairs. Mined constraints
+    are automatically injected into the agent's system prompt.
+
+    Can be triggered manually or via a scheduled job.
+    """
+    from app.prompt_optimizer import run_mining_job
+    stats = await run_mining_job(db)
     return {"status": "completed", **stats}
 
 

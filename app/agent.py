@@ -7,7 +7,7 @@ from datetime import date
 
 from openai import AsyncAzureOpenAI
 
-from app.db import search_documents
+from app.db import search_documents, get_active_constraints
 from app.extraction import (
     get_total_spending,
     get_spending_by_merchant,
@@ -119,7 +119,7 @@ TOOLS = [
 ]
 
 
-SYSTEM_PROMPT = """You are a helpful assistant that analyzes the user's screenshots, images, documents and receipts.
+SYSTEM_PROMPT_BASE = """You are a helpful assistant that analyzes the user's screenshots, images, documents and receipts.
 All uploaded content is stored as searchable documents.
 Your primary goal is to extract information from these files and answer any questions the user has about that information.
 You have tools to search documents, query spending data, and retrieve receipt details.
@@ -132,6 +132,30 @@ When answering questions:
 5. For "when" questions: first check if a date was extracted from the document content. If no date exists, fall back to `created_at` (the upload timestamp) as an approximate date for when the event occurred
 
 Today's date is {today}. Use this to interpret relative dates like "last month" or "this year"."""
+
+
+async def build_system_prompt(db) -> str:
+    """Build system prompt with base instructions + mined constraints."""
+    prompt = SYSTEM_PROMPT_BASE.format(today=date.today().isoformat())
+
+    constraints = await get_active_constraints(db)
+    if not constraints:
+        return prompt
+
+    tool_rules = [c["rule"] for c in constraints if c["type"] == "tool_selection"]
+    answer_rules = [c["rule"] for c in constraints if c["type"] == "answer_generation"]
+
+    if tool_rules:
+        prompt += "\n\nTool selection guidance (learned from user feedback):\n"
+        for rule in tool_rules:
+            prompt += f"- {rule}\n"
+
+    if answer_rules:
+        prompt += "\n\nAnswer formatting guidance (learned from user feedback):\n"
+        for rule in answer_rules:
+            prompt += f"- {rule}\n"
+
+    return prompt
 
 
 async def execute_tool(db, user_id: str, tool_call) -> str:
@@ -172,6 +196,7 @@ async def ask_agent(db, user_id: str, question: str) -> Dict[str, Any]:
         return {
             "answer": gate_result.message,
             "sources": [],
+            "tool_trace": [],
             "safety": {
                 "strategy": gate_result.strategy.value if gate_result.strategy else None,
                 "message": gate_result.message,
@@ -186,7 +211,8 @@ async def ask_agent(db, user_id: str, question: str) -> Dict[str, Any]:
             if attempt == AGENT_MAX_RETRIES:
                 return {
                     "answer": "Sorry, I had trouble processing that. Please try again.",
-                    "sources": []
+                    "sources": [],
+                    "tool_trace": [],
                 }
             continue
 
@@ -200,12 +226,14 @@ async def _ask_agent_impl(db, user_id: str, question: str) -> Dict[str, Any]:
     )
     deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1")
 
+    system_prompt = await build_system_prompt(db)
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT.format(today=date.today().isoformat())},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": question}
     ]
 
     sources = []
+    tool_trace = []  # Compact trace for feedback loop: [{tool, args, result_summary, task_adherence_risk}]
 
     # Loop: VLM calls tools until it produces final answer
     for _ in range(5):  # Max 5 iterations to prevent infinite loops
@@ -238,6 +266,19 @@ async def _ask_agent_impl(db, user_id: str, question: str) -> Dict[str, Any]:
                     "tool_call_id": tool_call.id,
                     "content": result
                 })
+
+                # Build compact trace entry
+                try:
+                    args = json.loads(tool_call.function.arguments)
+                except json.JSONDecodeError:
+                    args = tool_call.function.arguments
+                tool_trace.append({
+                    "tool": tool_call.function.name,
+                    "args": args,
+                    "result_summary": result[:500],
+                    "task_adherence_risk": task_risk if task_risk is not None else False,
+                })
+
                 # Track doc_ids as sources
                 try:
                     data = json.loads(result)
@@ -259,6 +300,7 @@ async def _ask_agent_impl(db, user_id: str, question: str) -> Dict[str, Any]:
                 return {
                     "answer": gate_result.message,
                     "sources": list(set(sources)),
+                    "tool_trace": tool_trace,
                     "safety": {
                         "strategy": gate_result.strategy.value if gate_result.strategy else None,
                         "message": gate_result.message,
@@ -296,6 +338,7 @@ async def _ask_agent_impl(db, user_id: str, question: str) -> Dict[str, Any]:
             result = {
                 "answer": final_answer,
                 "sources": list(set(sources)),
+                "tool_trace": tool_trace,
             }
             if groundedness_info:
                 result["groundedness"] = groundedness_info
@@ -304,5 +347,6 @@ async def _ask_agent_impl(db, user_id: str, question: str) -> Dict[str, Any]:
     # Max iterations reached
     return {
         "answer": "I wasn't able to complete the analysis. Please try a simpler question.",
-        "sources": list(set(sources))
+        "sources": list(set(sources)),
+        "tool_trace": tool_trace,
     }
