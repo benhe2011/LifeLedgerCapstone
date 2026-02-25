@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from app.auth import get_current_user
 from app.s3 import upload_to_s3, generate_presigned_url, download_from_s3, delete_many_from_s3
-from app.db import get_db, create_document, search_documents, get_user_documents, get_document_by_id, update_document, get_documents_for_delete, delete_document_records, get_upcoming_events, get_similar_documents
+from app.db import get_db, create_document, search_documents, get_user_documents, get_document_by_id, update_document, get_documents_for_delete, delete_document_records, get_upcoming_events, get_similar_documents, log_regenerate
 from app.ocr_pipeline import process_image, process_batch_and_crawl
 from app.agent import ask_agent
 from app.radar_crawler import crawl_documents
@@ -153,6 +153,16 @@ class AskResponse(BaseModel):
     safety: Optional[SafetyInfo] = None
     groundedness: Optional[GroundednessInfo] = None
 
+
+class RegenerateRequest(BaseModel):
+    query: str
+    rejected_answer: str
+
+
+class RegenerateResult(BaseModel):
+    answer: str
+    safety: Optional[SafetyInfo] = None
+    groundedness: Optional[GroundednessInfo] = None
 
 class RejectedFile(BaseModel):
     """A file rejected by content safety moderation."""
@@ -328,6 +338,31 @@ async def search(
         answer=agent_result["answer"],
         documents=frontend_docs,
         query=request.query,
+        safety=safety,
+        groundedness=groundedness,
+    )
+
+
+@app.post("/regenerate", response_model=RegenerateResult)
+async def regenerate(
+    request: RegenerateRequest,
+    user_id: str = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Regenerate AI answer and log the rejected one for quality tracking."""
+    await log_regenerate(db, user_id, request.query, request.rejected_answer)
+    agent_result = await ask_agent(db, user_id, request.query)
+
+    safety = None
+    if agent_result.get("safety"):
+        safety = SafetyInfo(**agent_result["safety"])
+
+    groundedness = None
+    if agent_result.get("groundedness"):
+        groundedness = GroundednessInfo(**agent_result["groundedness"])
+
+    return RegenerateResult(
+        answer=agent_result["answer"],
         safety=safety,
         groundedness=groundedness,
     )
