@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from app.auth import get_current_user
 from app.s3 import upload_to_s3, generate_presigned_url, download_from_s3, delete_many_from_s3
-from app.db import get_db, create_document, search_documents, get_user_documents, get_document_by_id, update_document, get_documents_for_delete, delete_document_records, get_upcoming_events, get_similar_documents, log_regenerate
+from app.db import get_db, create_tables, create_document, search_documents, get_user_documents, get_document_by_id, update_document, get_documents_for_delete, delete_document_records, get_upcoming_events, get_similar_documents, log_regenerate
 from app.ocr_pipeline import process_image, process_batch_and_crawl
 from app.agent import ask_agent
 from app.radar_crawler import crawl_documents
@@ -38,7 +38,9 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: pre-warm OCR model to avoid cold start on first request
+    # Startup: ensure all tables exist (uses IF NOT EXISTS, safe to run every time)
+    await create_tables()
+    # Pre-warm OCR model to avoid cold start on first request
     from app.ocr_pipeline import get_ocr_model
     logger.info("Pre-warming PaddleOCR model...")
     get_ocr_model()
