@@ -104,9 +104,18 @@ async def create_tables():
                 id SERIAL PRIMARY KEY,
                 user_id TEXT NOT NULL,
                 query_text TEXT NOT NULL,
+                mined BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT NOW()
             )
         """)
+        # Add mined column if table already existed without it
+        try:
+            await conn.execute("""
+                ALTER TABLE regenerate_sessions ADD COLUMN IF NOT EXISTS mined BOOLEAN DEFAULT FALSE
+            """)
+        except Exception:
+            pass  # Column already exists or table just created with it
+
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS regenerate_attempts (
                 id SERIAL PRIMARY KEY,
@@ -116,11 +125,6 @@ async def create_tables():
                 tool_trace JSONB,
                 created_at TIMESTAMP DEFAULT NOW()
             )
-        """)
-
-        # Track which sessions have been mined for constraints
-        await conn.execute("""
-            ALTER TABLE regenerate_sessions ADD COLUMN IF NOT EXISTS mined BOOLEAN DEFAULT FALSE
         """)
 
         # Mined prompt constraints from feedback loop
