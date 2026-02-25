@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from app.auth import get_current_user
 from app.s3 import upload_to_s3, generate_presigned_url, download_from_s3, delete_many_from_s3
-from app.db import get_db, create_tables, create_document, search_documents, get_user_documents, get_document_by_id, update_document, get_documents_for_delete, delete_document_records, get_upcoming_events, get_similar_documents, create_regenerate_session, log_regenerate_attempt
+from app.db import get_db, create_tables, create_document, search_documents, get_user_documents, get_document_by_id, update_document, get_documents_for_delete, delete_document_records, get_upcoming_events, get_similar_documents, create_regenerate_session, log_regenerate_attempt, count_unmined_sessions
 from app.ocr_pipeline import process_image, process_batch_and_crawl
 from app.agent import ask_agent
 from app.radar_crawler import crawl_documents
@@ -34,6 +34,9 @@ for _logger_name in ['app.ocr_pipeline', 'app.radar_crawler', 'app.vlm_client', 
     _logger.addHandler(_log_handler)
 
 logger = logging.getLogger(__name__)
+
+# Auto-trigger constraint mining after this many unmined regeneration sessions accumulate
+MINING_THRESHOLD = int(os.getenv("MINING_THRESHOLD", "20"))
 
 
 @asynccontextmanager
@@ -356,6 +359,7 @@ async def search(
 @app.post("/regenerate", response_model=RegenerateResult)
 async def regenerate(
     request: RegenerateRequest,
+    background_tasks: BackgroundTasks,
     user_id: str = Depends(get_current_user),
     db=Depends(get_db),
 ):
@@ -377,6 +381,12 @@ async def regenerate(
         agent_result.get("tool_trace", []),
     )
 
+    # Auto-trigger constraint mining when threshold is reached
+    unmined = await count_unmined_sessions(db)
+    if unmined >= MINING_THRESHOLD:
+        logger.info("Mining threshold reached (%d >= %d), triggering background mining", unmined, MINING_THRESHOLD)
+        background_tasks.add_task(_run_mining_background, db)
+
     safety = None
     if agent_result.get("safety"):
         safety = SafetyInfo(**agent_result["safety"])
@@ -390,6 +400,16 @@ async def regenerate(
         safety=safety,
         groundedness=groundedness,
     )
+
+
+async def _run_mining_background(db):
+    """Background task wrapper for constraint mining."""
+    try:
+        from app.prompt_optimizer import run_mining_job
+        stats = await run_mining_job(db)
+        logger.info("Background mining complete: %s", stats)
+    except Exception as e:
+        logger.error("Background mining failed: %s", e)
 
 
 @app.get("/documents")
