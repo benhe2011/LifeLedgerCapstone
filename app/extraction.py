@@ -1,6 +1,7 @@
 """Field extraction and storage for structured document data."""
-from typing import Dict, Any
-from datetime import datetime, date
+from typing import Dict, Any, List
+from datetime import datetime, date, timedelta
+from collections import defaultdict
 
 
 def parse_date(date_str: str) -> date | None:
@@ -172,3 +173,155 @@ async def get_receipts_by_date_range(db, user_id: str, start_date: str, end_date
         }
         for r in rows
     ]
+
+
+async def detect_recurring_costs(db, user_id: str) -> List[dict]:
+    """Detect recurring charges by analyzing purchase intervals per merchant."""
+    sql = """
+        SELECT e.merchant, e.date, e.total_amount
+        FROM extractions e
+        JOIN documents d ON e.doc_id = d.id
+        WHERE d.user_id = $1 AND e.merchant IS NOT NULL AND e.date IS NOT NULL
+        ORDER BY e.merchant, e.date
+    """
+    rows = await db.fetch(sql, user_id)
+
+    # Group by merchant
+    by_merchant: Dict[str, list] = defaultdict(list)
+    for r in rows:
+        by_merchant[r["merchant"]].append({
+            "date": r["date"],
+            "amount": float(r["total_amount"]) if r["total_amount"] else 0,
+        })
+
+    results = []
+    for merchant, transactions in by_merchant.items():
+        if len(transactions) < 2:
+            continue
+
+        dates = [t["date"] for t in transactions]
+        amounts = [t["amount"] for t in transactions if t["amount"]]
+        intervals = [(dates[i + 1] - dates[i]).days for i in range(len(dates) - 1)]
+
+        if not intervals:
+            continue
+
+        avg_interval = sum(intervals) / len(intervals)
+        avg_amount = sum(amounts) / len(amounts) if amounts else 0
+
+        is_monthly = 28 <= avg_interval <= 31
+        is_annual = 350 <= avg_interval <= 380
+
+        if not (is_monthly or is_annual):
+            continue
+
+        interval_days = round(avg_interval)
+        last_date = dates[-1]
+        next_renewal = last_date + timedelta(days=interval_days)
+
+        if is_monthly:
+            monthly_est = avg_amount
+            annual_est = avg_amount * 12
+        else:
+            monthly_est = avg_amount / 12
+            annual_est = avg_amount
+
+        results.append({
+            "merchant": merchant,
+            "is_recurring": True,
+            "interval_days": interval_days,
+            "monthly_estimate": round(monthly_est, 2),
+            "annual_estimate": round(annual_est, 2),
+            "next_renewal_date": next_renewal.isoformat(),
+            "last_date": last_date.isoformat(),
+            "transaction_count": len(transactions),
+        })
+
+    return results
+
+
+_TRAVEL_KEYWORDS = {
+    "hotel", "flight", "airport", "booking", "reservation", "airline",
+    "departure", "arrival", "boarding", "lodging", "accommodation",
+    "travel", "itinerary", "check-in", "checkin", "check-out", "checkout",
+    "airbnb", "hostel", "resort", "terminal", "gate",
+}
+
+
+def _is_travel_doc(doc_text: str, merchant: str) -> bool:
+    """Check if a document is travel-related based on text content."""
+    text_lower = (doc_text or "").lower() + " " + (merchant or "").lower()
+    return any(kw in text_lower for kw in _TRAVEL_KEYWORDS)
+
+
+async def detect_trips(db, user_id: str, proximity_days: int = 3) -> List[dict]:
+    """Cluster travel-related documents into trips by date proximity."""
+    sql = """
+        SELECT e.doc_id, e.merchant, e.date, e.total_amount, e.address,
+               d.doc_type, d.doc_text
+        FROM extractions e
+        JOIN documents d ON e.doc_id = d.id
+        WHERE d.user_id = $1 AND e.date IS NOT NULL
+        ORDER BY e.date
+    """
+    rows = await db.fetch(sql, user_id)
+
+    # Filter to travel-related documents
+    travel_docs = []
+    for r in rows:
+        if _is_travel_doc(r["doc_text"], r["merchant"]):
+            travel_docs.append({
+                "doc_id": r["doc_id"],
+                "merchant": r["merchant"],
+                "date": r["date"],
+                "amount": float(r["total_amount"]) if r["total_amount"] else 0,
+                "address": r["address"],
+            })
+
+    if not travel_docs:
+        return []
+
+    # Cluster by date proximity
+    trips = []
+    current_trip = [travel_docs[0]]
+
+    for doc in travel_docs[1:]:
+        prev_date = current_trip[-1]["date"]
+        if (doc["date"] - prev_date).days <= proximity_days:
+            current_trip.append(doc)
+        else:
+            trips.append(current_trip)
+            current_trip = [doc]
+    trips.append(current_trip)
+
+    # Build trip summaries
+    results = []
+    for trip_docs in trips:
+        dates = [d["date"] for d in trip_docs]
+        addresses = [d["address"] for d in trip_docs if d["address"]]
+        total_cost = sum(d["amount"] for d in trip_docs)
+
+        # Location hint: most common address or first available
+        location_hint = None
+        if addresses:
+            # Use the longest address as hint (usually most descriptive)
+            location_hint = max(addresses, key=len)
+
+        results.append({
+            "start_date": min(dates).isoformat(),
+            "end_date": max(dates).isoformat(),
+            "total_cost": round(total_cost, 2),
+            "document_count": len(trip_docs),
+            "location_hint": location_hint,
+            "documents": [
+                {
+                    "doc_id": d["doc_id"],
+                    "merchant": d["merchant"],
+                    "date": d["date"].isoformat(),
+                    "amount": d["amount"],
+                }
+                for d in trip_docs
+            ],
+        })
+
+    return results

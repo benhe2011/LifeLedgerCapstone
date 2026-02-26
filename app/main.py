@@ -20,6 +20,11 @@ from app.ocr_pipeline import process_image, process_batch_and_crawl
 from app.agent import ask_agent
 from app.radar_crawler import crawl_documents
 from app.content_safety import moderate_image, moderate_user_text
+from app.extraction import (
+    get_spending_by_merchant,
+    detect_recurring_costs,
+    detect_trips,
+)
 
 # Configure logging for our app modules (uvicorn already configured root)
 import logging
@@ -372,6 +377,15 @@ async def regenerate(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    # Rate limit: max 3 regenerates per session in last 60 seconds
+    recent = await db.fetchval(
+        """SELECT COUNT(*) FROM regenerate_attempts
+           WHERE session_id = $1 AND created_at > NOW() - INTERVAL '60 seconds'""",
+        request.session_id,
+    )
+    if recent and recent >= 3:
+        raise HTTPException(status_code=429, detail="Too many regenerate requests. Please wait a minute.")
+
     agent_result = await ask_agent(db, user_id, session["query_text"])
 
     # Log this attempt
@@ -689,6 +703,77 @@ async def trigger_constraint_mining(
     from app.prompt_optimizer import run_mining_job
     stats = await run_mining_job(db)
     return {"status": "completed", **stats}
+
+
+@app.get("/analytics/spending")
+async def analytics_spending(
+    months: int = 6,
+    user_id: str = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Get spending analytics: by merchant and by month."""
+    from datetime import datetime as dt, timedelta
+    end_date = dt.now().date()
+    start_date = end_date - timedelta(days=30 * months)
+    by_merchant = await get_spending_by_merchant(
+        db, user_id,
+        start_date=start_date.isoformat(),
+        end_date=end_date.isoformat(),
+        limit=10,
+    )
+
+    # Monthly totals
+    rows = await db.fetch(
+        """SELECT TO_CHAR(e.date, 'YYYY-MM') as month, SUM(e.total_amount) as total
+           FROM extractions e JOIN documents d ON e.doc_id = d.id
+           WHERE d.user_id = $1 AND e.total_amount IS NOT NULL AND e.date IS NOT NULL
+             AND e.date >= CURRENT_DATE - make_interval(months => $2)
+           GROUP BY month ORDER BY month""",
+        user_id, months,
+    )
+    by_month = [{"month": r["month"], "total": float(r["total"])} for r in rows]
+
+    grand_total = sum(m["total"] for m in by_month)
+
+    return {
+        "by_merchant": by_merchant,
+        "by_month": by_month,
+        "total": round(grand_total, 2),
+    }
+
+
+@app.get("/analytics/recurring")
+async def analytics_recurring(
+    user_id: str = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Get detected recurring subscriptions and charges."""
+    recurring = await detect_recurring_costs(db, user_id)
+    total_monthly = sum(r["monthly_estimate"] for r in recurring)
+    total_annual = sum(r["annual_estimate"] for r in recurring)
+
+    return {
+        "recurring": recurring,
+        "total_monthly": round(total_monthly, 2),
+        "total_annual": round(total_annual, 2),
+        "count": len(recurring),
+    }
+
+
+@app.get("/analytics/trips")
+async def analytics_trips(
+    user_id: str = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Get detected travel trips grouped by date proximity."""
+    trips = await detect_trips(db, user_id)
+    total_trip_spending = sum(t["total_cost"] for t in trips)
+
+    return {
+        "trips": trips,
+        "total_trip_spending": round(total_trip_spending, 2),
+        "count": len(trips),
+    }
 
 
 # Helper functions for frontend format conversion

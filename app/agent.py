@@ -13,6 +13,8 @@ from app.extraction import (
     get_spending_by_merchant,
     get_receipts_by_merchant,
     get_receipts_by_date_range,
+    detect_recurring_costs,
+    detect_trips,
 )
 from app.content_safety import (
     shield_agent_prompt,
@@ -115,6 +117,28 @@ TOOLS = [
                 "required": ["start_date", "end_date"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_recurring_costs",
+            "description": "Detect recurring subscriptions and charges. Returns merchants with recurring billing patterns (monthly or annual), estimated costs, and next expected charge date. Use for 'what are my subscriptions' or 'recurring costs' questions.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_trips",
+            "description": "Detect travel trips by clustering travel-related documents (hotels, flights, bookings) by date proximity. Returns trip summaries with dates, locations, costs, and linked documents. Use for 'show me my trips' or 'travel expenses' questions.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
     }
 ]
 
@@ -182,6 +206,10 @@ async def execute_tool(db, user_id: str, tool_call) -> str:
         result = await get_receipts_by_merchant(db, user_id, args["merchant"], args.get("limit", 20))
     elif name == "get_receipts_by_date_range":
         result = await get_receipts_by_date_range(db, user_id, args["start_date"], args["end_date"], args.get("limit", 50))
+    elif name == "get_recurring_costs":
+        result = await detect_recurring_costs(db, user_id)
+    elif name == "get_trips":
+        result = await detect_trips(db, user_id)
     else:
         result = {"error": f"Unknown tool: {name}"}
 
