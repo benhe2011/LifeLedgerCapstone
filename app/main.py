@@ -712,7 +712,15 @@ async def analytics_spending(
     db=Depends(get_db),
 ):
     """Get spending analytics: by merchant and by month."""
-    by_merchant = await get_spending_by_merchant(db, user_id, limit=10)
+    from datetime import datetime as dt, timedelta
+    end_date = dt.now().date()
+    start_date = end_date - timedelta(days=30 * months)
+    by_merchant = await get_spending_by_merchant(
+        db, user_id,
+        start_date=start_date.isoformat(),
+        end_date=end_date.isoformat(),
+        limit=10,
+    )
 
     # Monthly totals
     rows = await db.fetch(
