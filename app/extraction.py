@@ -196,7 +196,7 @@ async def detect_recurring_costs(db, user_id: str) -> List[dict]:
 
     results = []
     for merchant, transactions in by_merchant.items():
-        if len(transactions) < 2:
+        if len(transactions) < 3:
             continue
 
         dates = [t["date"] for t in transactions]
