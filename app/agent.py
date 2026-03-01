@@ -1,12 +1,12 @@
-"""VLM-driven agent with tool calling for document analysis."""
+"""VLM-driven ReAct agent with tool calling for document analysis."""
 import json
 import logging
 import os
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Annotated, TypedDict, Union
 from datetime import date
-
+from operator import add
 from openai import AsyncAzureOpenAI
-
+from langgraph.graph import StateGraph, END
 from app.db import search_documents, get_active_constraints
 from app.extraction import (
     get_total_spending,
@@ -25,10 +25,10 @@ from app.content_safety import (
 
 logger = logging.getLogger(__name__)
 
-# Agent configuration (env-configurable)
+# --- Configuration ---
 AGENT_TEMPERATURE = float(os.getenv("AGENT_TEMPERATURE", "0.3"))
 AGENT_MAX_RETRIES = int(os.getenv("AGENT_MAX_RETRIES", "0"))
-
+DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4")
 
 def repair_json(s: str) -> str:
     """Attempt to fix common JSON issues from truncated LLM output."""
@@ -161,14 +161,14 @@ Today's date is {today}. Use this to interpret relative dates like "last month" 
 async def build_system_prompt(db) -> str:
     """Build system prompt with base instructions + mined constraints."""
     prompt = SYSTEM_PROMPT_BASE.format(today=date.today().isoformat())
-
+    
     constraints = await get_active_constraints(db)
     if not constraints:
         return prompt
-
+    
     tool_rules = [c["rule"] for c in constraints if c["type"] == "tool_selection"]
     answer_rules = [c["rule"] for c in constraints if c["type"] == "answer_generation"]
-
+    
     if tool_rules:
         prompt += "\n\nTool selection guidance (learned from user feedback):\n"
         for rule in tool_rules:
@@ -182,7 +182,7 @@ async def build_system_prompt(db) -> str:
     return prompt
 
 
-async def execute_tool(db, user_id: str, tool_call) -> str:
+async def execute_tool(db, user_id: str, tool_call: Any) -> str:
     """Execute a tool call and return JSON result."""
     name = tool_call.function.name
     raw_args = tool_call.function.arguments
@@ -215,120 +215,107 @@ async def execute_tool(db, user_id: str, tool_call) -> str:
 
     return json.dumps(result)
 
+# --- LangGraph Implementation ---
 
-async def ask_agent(db, user_id: str, question: str) -> Dict[str, Any]:
-    """VLM-driven agent with tool calling. Supports configurable retries."""
-    # ── Content Safety: check user question ──
-    gate_result = await shield_agent_prompt(question)
-    if not gate_result.is_safe:
-        return {
-            "answer": gate_result.message,
-            "sources": [],
-            "tool_trace": [],
-            "safety": {
-                "strategy": gate_result.strategy.value if gate_result.strategy else None,
-                "message": gate_result.message,
-                "detail": gate_result.detail,
-            },
-        }
+class AgentState(TypedDict):
+    messages: Annotated[List[Dict[str, Any]], add]
+    db: Any
+    user_id: str
+    sources: Annotated[List[str], add]
+    tool_trace: Annotated[List[Dict[str, Any]], add]
+    final_result: Dict[str, Any]
 
-    for attempt in range(AGENT_MAX_RETRIES + 1):
-        try:
-            return await _ask_agent_impl(db, user_id, question)
-        except Exception as e:
-            if attempt == AGENT_MAX_RETRIES:
-                return {
-                    "answer": "Sorry, I had trouble processing that. Please try again.",
-                    "sources": [],
-                    "tool_trace": [],
-                }
-            continue
-
-
-async def _ask_agent_impl(db, user_id: str, question: str) -> Dict[str, Any]:
-    """Internal implementation of ask_agent."""
+async def call_model(state: AgentState):
     client = AsyncAzureOpenAI(
         azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
         api_key=os.getenv("AZURE_OPENAI_KEY"),
-        api_version="2024-02-15-preview",
+        api_version="2024-02-15-preview"
     )
-    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1")
+    sys_prompt = await build_system_prompt(state["db"])
+    msgs = [{"role": "system", "content": sys_prompt}] + state["messages"]
+    
+    response = await client.chat.completions.create(
+        model=DEPLOYMENT,
+        messages=msgs,
+        tools=TOOLS,
+        tool_choice="auto",
+        temperature=AGENT_TEMPERATURE
+    )
+    return {"messages": [response.choices[0].message]}
 
-    system_prompt = await build_system_prompt(db)
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": question}
-    ]
+async def call_tools(state: AgentState):
+    last_msg = state["messages"][-1]
+    new_messages = []
+    new_sources = []
+    new_traces = []
+    
+    task_risk = await check_task_adherence(TOOLS, state["messages"])
+    if task_risk is True:
+        logger.warning(
+            "Task adherence risk for user=%s, tool_calls=%s",
+            state["user_id"],
+            [tc.function.name for tc in last_msg.tool_calls],
+            )
+    
+    for tool_call in last_msg.tool_calls:
+        result_str = await execute_tool(state["db"], state["user_id"], tool_call)
+        new_messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result_str})
+        
+        try:
+            args = json.loads(tool_call.function.arguments)
+        except:
+            args = tool_call.function.arguments
 
-    sources = []
-    tool_trace = []  # Compact trace for feedback loop: [{tool, args, result_summary, task_adherence_risk}]
+        new_traces.append({
+            "tool": tool_call.function.name,
+            "args": args,
+            "result_summary": result_str[:500],
+            "task_adherence_risk": bool(task_risk)
+        })
 
-    # Loop: VLM calls tools until it produces final answer
-    for _ in range(5):  # Max 5 iterations to prevent infinite loops
-        response = await client.chat.completions.create(
-            model=deployment,
-            messages=messages,
-            tools=TOOLS,
-            tool_choice="auto",
-            temperature=AGENT_TEMPERATURE,
-        )
+        try:
+            data = json.loads(result_str)
+            if isinstance(data, list):
+                for item in data:
+                    if "doc_id" in item: new_sources.append(str(item["doc_id"]))
+                    elif "id" in item: new_sources.append(str(item["id"]))
+        except: pass
 
-        msg = response.choices[0].message
-        messages.append(msg)  # Add assistant message to history
+    return {"messages": new_messages, "sources": new_sources, "tool_trace": new_traces}
 
-        if msg.tool_calls:
-            # ── Content Safety: task adherence check (advisory) ──
-            task_risk = await check_task_adherence(TOOLS, messages)
-            if task_risk is True:
-                logger.warning(
-                    "Task adherence risk for user=%s, tool_calls=%s",
-                    user_id,
-                    [tc.function.name for tc in msg.tool_calls],
-                )
+def router(state: AgentState):
+    if state["messages"][-1].tool_calls: return "tools"
+    return END
 
-            # Execute each tool call
-            for tool_call in msg.tool_calls:
-                result = await execute_tool(db, user_id, tool_call)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result
-                })
+# --- Main Interface ---
 
-                # Build compact trace entry
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
-                    args = tool_call.function.arguments
-                tool_trace.append({
-                    "tool": tool_call.function.name,
-                    "args": args,
-                    "result_summary": result[:500],
-                    "task_adherence_risk": task_risk if task_risk is not None else False,
-                })
+async def ask_agent(db, user_id: str, question: str) -> Dict[str, Any]:
+    gate_result = await shield_agent_prompt(question)
+    if not gate_result.is_safe:
+        return {"answer": gate_result.message, "sources": [], "tool_trace": [], "safety": gate_result.__dict__}
 
-                # Track doc_ids as sources
-                try:
-                    data = json.loads(result)
-                    if isinstance(data, list):
-                        for item in data:
-                            if "doc_id" in item:
-                                sources.append(item["doc_id"])
-                            elif "id" in item:
-                                sources.append(item["id"])
-                except:
-                    pass
-        else:
-            # No more tool calls - this is the final answer
-            final_answer = msg.content or "I couldn't find relevant information."
+    workflow = StateGraph(AgentState)
+    workflow.add_node("agent", call_model)
+    workflow.add_node("tools", call_tools)
+    workflow.set_entry_point("agent")
+    workflow.add_conditional_edges("agent", router)
+    workflow.add_edge("tools", "agent")
+    graph = workflow.compile()
 
-            # ── Content Safety: moderate output text ──
+    for attempt in range(AGENT_MAX_RETRIES + 1):
+        try:
+            inputs = {"messages": [{"role": "user", "content": question}], "db": db, "user_id": user_id, "sources": [], "tool_trace": []}
+            output = await graph.ainvoke(inputs)
+            
+            final_answer = output["messages"][-1].content or "No information found."
+            
+            # Moderation
             gate_result = await moderate_output_text(final_answer)
             if not gate_result.is_safe:
                 return {
-                    "answer": gate_result.message,
-                    "sources": list(set(sources)),
-                    "tool_trace": tool_trace,
+                    "answer": gate_result.message, 
+                    "sources": list(set(output["sources"])), 
+                    "tool_trace": output["tool_trace"],
                     "safety": {
                         "strategy": gate_result.strategy.value if gate_result.strategy else None,
                         "message": gate_result.message,
@@ -336,20 +323,13 @@ async def _ask_agent_impl(db, user_id: str, question: str) -> Dict[str, Any]:
                     },
                 }
 
-            # ── Content Safety: groundedness check ──
-            grounding_sources = []
-            for m in messages:
-                if isinstance(m, dict) and m.get("role") == "tool":
-                    content = m.get("content", "")
-                    if content:
-                        grounding_sources.append(content)
-
+            # Groundedness
             groundedness_info = None
-            if grounding_sources:
-                ground_result = await check_groundedness(
-                    question, final_answer, grounding_sources
-                )
-                if ground_result and ground_result.get("ungrounded_detected"):
+            grounding_sources = []
+            grounding_sources = [m["content"] for m in output["messages"] if m.get("role") == "tool"]
+            ground_result = await check_groundedness(question, final_answer, grounding_sources) if grounding_sources else None
+
+            if grounding_sources and ground_result and ground_result.get("ungrounded_detected"):
                     pct = ground_result.get("ungrounded_percentage", 0)
                     if pct > 50:
                         groundedness_info = {
@@ -362,19 +342,18 @@ async def _ask_agent_impl(db, user_id: str, question: str) -> Dict[str, Any]:
                         logger.info(
                             "Groundedness warning: %.1f%% ungrounded", pct
                         )
-
+            
             result = {
                 "answer": final_answer,
-                "sources": list(set(sources)),
-                "tool_trace": tool_trace,
+                "sources": list(set(output["sources"])),
+                "tool_trace": output["tool_trace"]
             }
             if groundedness_info:
                 result["groundedness"] = groundedness_info
             return result
-
-    # Max iterations reached
-    return {
-        "answer": "I wasn't able to complete the analysis. Please try a simpler question.",
-        "sources": list(set(sources)),
-        "tool_trace": tool_trace,
-    }
+        
+        except Exception:
+            if attempt == AGENT_MAX_RETRIES:
+                return {"answer": "An error occurred.", "sources": [], "tool_trace": []}
+            continue
+        
