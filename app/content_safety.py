@@ -443,37 +443,44 @@ async def check_task_adherence(
 ) -> Optional[bool]:
     """Check if agent tool calls adhere to the user's task.
 
-    Handles both dict messages and OpenAI SDK ChatCompletionMessage objects.
-
-    Returns:
-        True  = task risk detected
-        False = no risk detected
-        None  = API failure (fail-open)
+    FIXED: Ensures 'contents' is never null or empty to avoid 
+    Azure API error: 'ContentItem Text cannot be null or empty'.
     """
     serialized_messages: List[Dict[str, Any]] = []
+    
     for msg in messages:
         if isinstance(msg, dict):
-            entry: Dict[str, Any] = {"role": msg.get("role", "user")}
-            if msg.get("content"):
-                entry["contents"] = msg["content"]
-            if msg.get("role") == "system":
+            role = msg.get("role", "user")
+            # Azure requirement: content cannot be empty string or None
+            raw_content = msg.get("content") or ""
+            safe_content = raw_content if raw_content.strip() else "[No text content]"
+
+            entry: Dict[str, Any] = {"role": role, "contents": safe_content}
+            
+            if role == "system":
                 entry["source"] = "Prompt"
-            elif msg.get("role") == "tool":
+            elif role == "tool":
                 entry["source"] = "Prompt"
                 entry["role"] = "Tool"
                 if msg.get("tool_call_id"):
                     entry["toolCallId"] = msg["tool_call_id"]
             else:
-                entry["source"] = "Prompt" if msg.get("role") == "user" else "Completion"
+                entry["source"] = "Prompt" if role == "user" else "Completion"
+            
             serialized_messages.append(entry)
         else:
-            # OpenAI SDK message object
+            # OpenAI SDK message object (ChatCompletionMessage)
             role = getattr(msg, "role", "assistant")
+            # Azure requirement: content cannot be empty string or None
+            raw_content = getattr(msg, "content", "") or ""
+            safe_content = raw_content if raw_content.strip() else "[No text content]"
+
             entry = {
                 "role": role.capitalize() if role != "assistant" else "Assistant",
                 "source": "Completion" if role == "assistant" else "Prompt",
-                "contents": getattr(msg, "content", "") or "",
+                "contents": safe_content,
             }
+            
             tool_calls = getattr(msg, "tool_calls", None)
             if tool_calls:
                 entry["toolCalls"] = [
@@ -493,6 +500,7 @@ async def check_task_adherence(
         "tools": tools,
         "messages": serialized_messages,
     }
+    
     result = await _call_safety_api(
         "agent:analyzeTaskAdherence", body, _TASK_ADHERENCE_API_VERSION
     )
