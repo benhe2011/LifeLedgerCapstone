@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+import re
 from typing import Dict, Any, List, Annotated, TypedDict, Union
 from datetime import date
 from operator import add
@@ -42,6 +43,16 @@ def repair_json(s: str) -> str:
     open_brackets = s.count('[') - s.count(']')
     s += ']' * open_brackets + '}' * open_braces
     return s
+
+
+def extract_cited_sources(answer: str) -> tuple[str, list[str]]:
+    """Extract cited doc_ids from answer and return (clean_answer, cited_ids)."""
+    cited_ids: list[str] = []
+    def _collect(m):
+        cited_ids.extend(s.strip() for s in m.group(1).split(',') if s.strip())
+        return ''
+    clean_answer = re.sub(r'<!--cited:([\w,\-]+)-->', _collect, answer).rstrip()
+    return clean_answer, cited_ids
 
 
 TOOLS = [
@@ -168,6 +179,9 @@ When answering questions:
 3. Include specific numbers, dates, and merchant names when relevant
 4. If asked about spending, always include the total amount
 5. For "when" questions: first check if a date was extracted from the document content. If no date exists, fall back to `created_at` (the upload timestamp) as an approximate date for when the event occurred
+6. CRITICAL — Source citation: You MUST end every answer with a citation tag listing the doc_ids of documents you used. Format: <!--cited:doc_id1,doc_id2,doc_id3-->
+   Example: If tool results included documents with doc_id "abc-123" and "def-456" and you referenced both, end your answer with: <!--cited:abc-123,def-456-->
+   Only cite documents whose data you directly used. This tag is required even if you only used one document.
 
 Today's date is {today}. Use this to interpret relative dates like "last month" or "this year"."""
 
@@ -310,7 +324,7 @@ def router(state: AgentState):
 
 # --- Main Interface ---
 
-async def ask_agent(db, user_id: str, question: str) -> Dict[str, Any]:
+async def ask_agent(db, user_id: str, question: str, history: list[dict] | None = None) -> Dict[str, Any]:
     """VLM-driven agent with LangGraph ReAct flow and UI-compatible serialization."""
     
     # 1. Content Safety: check user question (Prompt Shield)
@@ -339,12 +353,17 @@ async def ask_agent(db, user_id: str, question: str) -> Dict[str, Any]:
 
     for attempt in range(AGENT_MAX_RETRIES + 1):
         try:
-            # Initial state
+            # Initial state — prepend conversation history if provided
+            messages = []
+            if history:
+                messages.extend(history)
+            messages.append({"role": "user", "content": question})
+
             inputs = {
-                "messages": [{"role": "user", "content": question}], 
-                "db": db, 
-                "user_id": user_id, 
-                "sources": [], 
+                "messages": messages,
+                "db": db,
+                "user_id": user_id,
+                "sources": [],
                 "tool_trace": []
             }
             
@@ -399,9 +418,11 @@ async def ask_agent(db, user_id: str, question: str) -> Dict[str, Any]:
                         }
 
             # 6. Final Serialization aligned with "OLD" working UI schema
+            clean_answer, cited_sources = extract_cited_sources(str(final_answer))
             clean_result = {
-                "answer": str(final_answer),
+                "answer": clean_answer,
                 "documents": list(set(str(s) for s in output.get("sources", []))),
+                "cited_sources": cited_sources,
                 "query": question,
                 "session_id": None,  # Populated by the calling route handler
                 "safety": None,      # UI expects null when everything is safe
