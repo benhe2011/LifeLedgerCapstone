@@ -6,6 +6,7 @@ Integration notes:
 - Frontend calls /process after upload to trigger OCR pipeline
 """
 import os
+import uuid as _uuid
 from contextlib import asynccontextmanager
 from typing import List, Optional, Dict, Any
 
@@ -365,6 +366,41 @@ async def search(
             totalValue=_extract_total_value(doc),
             metadata=doc.get("metadata"),
         ))
+
+    # 7. Merge agent-cited documents not already in semantic results
+    cited_ids = agent_result.get("cited_sources", [])
+    existing_ids = {doc.id for doc in frontend_docs}
+    new_cited_ids = [cid for cid in cited_ids if cid not in existing_ids]
+    if new_cited_ids:
+        try:
+            valid_ids = []
+            for cid in new_cited_ids:
+                try:
+                    _uuid.UUID(cid)
+                    valid_ids.append(cid)
+                except ValueError:
+                    pass
+            if valid_ids:
+                cited_docs = await db.fetch(
+                    "SELECT id, s3_key, doc_type, doc_text, created_at, metadata "
+                    "FROM documents WHERE id = ANY($1::uuid[]) AND user_id = $2",
+                    valid_ids, user_id,
+                )
+                for doc in cited_docs:
+                    file_url = await generate_presigned_url(doc["s3_key"])
+                    frontend_docs.append(DocumentResponse(
+                        id=str(doc["id"]),
+                        type=_normalize_doc_type(doc.get("doc_type", "unknown")),
+                        fileUrl=file_url,
+                        status=_get_status(doc),
+                        primaryEntity=_extract_primary_entity(doc),
+                        secondaryEntity=None,
+                        primaryDate=doc.get("created_at", "")[:10],
+                        totalValue=_extract_total_value(doc),
+                        metadata=doc.get("metadata"),
+                    ))
+        except Exception as e:
+            logger.warning("Failed to fetch cited docs: %s", e)
 
     safety = None
     if agent_result.get("safety"):
