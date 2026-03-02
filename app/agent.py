@@ -179,8 +179,9 @@ When answering questions:
 3. Include specific numbers, dates, and merchant names when relevant
 4. If asked about spending, always include the total amount
 5. For "when" questions: first check if a date was extracted from the document content. If no date exists, fall back to `created_at` (the upload timestamp) as an approximate date for when the event occurred
-6. IMPORTANT: At the very end of your answer, list the doc_ids of documents you directly referenced using this exact format: <!--cited:doc_id1,doc_id2,doc_id3-->
-   Only include documents whose specific data you used in your answer. Do not include all documents from a tool call — only the ones you actually cited.
+6. CRITICAL — Source citation: You MUST end every answer with a citation tag listing the doc_ids of documents you used. Format: <!--cited:doc_id1,doc_id2,doc_id3-->
+   Example: If tool results included documents with doc_id "abc-123" and "def-456" and you referenced both, end your answer with: <!--cited:abc-123,def-456-->
+   Only cite documents whose data you directly used. This tag is required even if you only used one document.
 
 Today's date is {today}. Use this to interpret relative dates like "last month" or "this year"."""
 

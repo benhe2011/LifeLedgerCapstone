@@ -369,6 +369,9 @@ async def search(
 
     # 7. Merge agent-cited documents not already in semantic results
     cited_ids = agent_result.get("cited_sources", [])
+    # Fallback: if agent didn't cite, use accumulated tool sources (capped)
+    if not cited_ids:
+        cited_ids = agent_result.get("documents", [])[:8]
     existing_ids = {doc.id for doc in frontend_docs}
     new_cited_ids = [cid for cid in cited_ids if cid not in existing_ids]
     if new_cited_ids:
