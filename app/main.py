@@ -383,7 +383,7 @@ async def search(
                     pass
             if valid_ids:
                 cited_docs = await db.fetch(
-                    "SELECT id, s3_key, doc_type, doc_text, created_at, metadata "
+                    "SELECT id, s3_key, doc_type, doc_text, created_at "
                     "FROM documents WHERE id = ANY($1::int[]) AND user_id = $2",
                     valid_ids, user_id,
                 )
@@ -398,7 +398,6 @@ async def search(
                         secondaryEntity=None,
                         primaryDate=doc.get("created_at", "")[:10],
                         totalValue=_extract_total_value(doc),
-                        metadata=doc.get("metadata"),
                     ))
         except Exception as e:
             logger.warning("Failed to fetch cited docs: %s", e)
