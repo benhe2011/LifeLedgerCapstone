@@ -284,16 +284,35 @@ async def call_tools(state: AgentState):
     return {"messages": new_messages, "sources": new_sources, "tool_trace": new_traces}
 
 def router(state: AgentState):
-    if state["messages"][-1].tool_calls: return "tools"
+    last_msg = state["messages"][-1]
+    # If the LLM generated tool calls, go to tools
+    if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+        return "tools"
+    # If it's a Tool message or an Assistant message with content, the loop continues 
+    # until the Assistant provides a final text response without tool calls.
     return END
 
 # --- Main Interface ---
 
 async def ask_agent(db, user_id: str, question: str) -> Dict[str, Any]:
+    """VLM-driven agent with LangGraph ReAct flow and UI-compatible serialization."""
+    
+    # 1. Content Safety: check user question (Prompt Shield)
     gate_result = await shield_agent_prompt(question)
     if not gate_result.is_safe:
-        return {"answer": gate_result.message, "sources": [], "tool_trace": [], "safety": gate_result.__dict__}
+        return {
+            "answer": gate_result.message,
+            "documents": [],
+            "query": question,
+            "safety": {
+                "strategy": gate_result.strategy.value if gate_result.strategy else None,
+                "message": gate_result.message,
+                "detail": gate_result.detail,
+            },
+            "groundedness": None
+        }
 
+    # 2. Build the LangGraph Workflow
     workflow = StateGraph(AgentState)
     workflow.add_node("agent", call_model)
     workflow.add_node("tools", call_tools)
@@ -304,56 +323,88 @@ async def ask_agent(db, user_id: str, question: str) -> Dict[str, Any]:
 
     for attempt in range(AGENT_MAX_RETRIES + 1):
         try:
-            inputs = {"messages": [{"role": "user", "content": question}], "db": db, "user_id": user_id, "sources": [], "tool_trace": []}
+            # Initial state
+            inputs = {
+                "messages": [{"role": "user", "content": question}], 
+                "db": db, 
+                "user_id": user_id, 
+                "sources": [], 
+                "tool_trace": []
+            }
+            
             output = await graph.ainvoke(inputs)
-            
-            final_answer = output["messages"][-1].content or "No information found."
-            
-            # Moderation
-            gate_result = await moderate_output_text(final_answer)
-            if not gate_result.is_safe:
+
+            # 3. Extract final answer safely (handles Objects vs Dicts)
+            final_answer = "I couldn't find a specific answer in your documents."
+            for m in reversed(output.get("messages", [])):
+                is_dict = isinstance(m, dict)
+                role = m.get("role") if is_dict else getattr(m, "role", "")
+                content = m.get("content") if is_dict else getattr(m, "content", "")
+                
+                if role.lower() == "assistant" and content:
+                    has_tools = (m.get("tool_calls") if is_dict else getattr(m, "tool_calls", None))
+                    if not has_tools:
+                        final_answer = content
+                        break
+
+            # 4. Content Safety: moderate final output
+            out_gate = await moderate_output_text(final_answer)
+            if not out_gate.is_safe:
                 return {
-                    "answer": gate_result.message, 
-                    "sources": list(set(output["sources"])), 
-                    "tool_trace": output["tool_trace"],
+                    "answer": out_gate.message,
+                    "documents": list(set(str(s) for s in output.get("sources", []))),
+                    "query": question,
                     "safety": {
-                        "strategy": gate_result.strategy.value if gate_result.strategy else None,
-                        "message": gate_result.message,
-                        "detail": gate_result.detail,
+                        "strategy": out_gate.strategy.value if out_gate.strategy else None,
+                        "message": out_gate.message,
+                        "detail": out_gate.detail
                     },
+                    "groundedness": None
                 }
 
-            # Groundedness
-            groundedness_info = None
+            # 5. Groundedness logic
             grounding_sources = []
-            grounding_sources = [m["content"] for m in output["messages"] if m.get("role") == "tool"]
-            ground_result = await check_groundedness(question, final_answer, grounding_sources) if grounding_sources else None
+            for m in output.get("messages", []):
+                is_dict = isinstance(m, dict)
+                role = (m.get("role") if is_dict else getattr(m, "role", "")).lower()
+                content = m.get("content") if is_dict else getattr(m, "content", "")
+                if role == "tool" and content:
+                    grounding_sources.append(content)
 
-            if grounding_sources and ground_result and ground_result.get("ungrounded_detected"):
+            groundedness_info = None
+            if grounding_sources:
+                ground_result = await check_groundedness(question, final_answer, grounding_sources)
+                if ground_result and ground_result.get("ungrounded_detected"):
                     pct = ground_result.get("ungrounded_percentage", 0)
                     if pct > 50:
                         groundedness_info = {
                             "ungrounded_pct": pct,
-                            "message": (
-                                "Some parts of this response may not be "
-                                "fully supported by your documents."
-                            ),
+                            "message": "Some parts of this response may not be fully supported by your documents.",
                         }
-                        logger.info(
-                            "Groundedness warning: %.1f%% ungrounded", pct
-                        )
-            
-            result = {
-                "answer": final_answer,
-                "sources": list(set(output["sources"])),
-                "tool_trace": output["tool_trace"]
+
+            # 6. Final Serialization aligned with "OLD" working UI schema
+            clean_result = {
+                "answer": str(final_answer),
+                "documents": list(set(str(s) for s in output.get("sources", []))),
+                "query": question,
+                "session_id": None,  # Populated by the calling route handler
+                "safety": None,      # UI expects null when everything is safe
+                "groundedness": groundedness_info
             }
-            if groundedness_info:
-                result["groundedness"] = groundedness_info
-            return result
-        
-        except Exception:
+
+            # Optionally include tool_trace if needed for internal logging/debugging
+            # clean_result["tool_trace"] = output.get("tool_trace", [])
+
+            return clean_result
+
+        except Exception as e:
+            logger.error(f"Agent attempt {attempt} failed: {str(e)}", exc_info=True)
             if attempt == AGENT_MAX_RETRIES:
-                return {"answer": "An error occurred.", "sources": [], "tool_trace": []}
+                return {
+                    "answer": "I encountered an error while processing your request.",
+                    "documents": [],
+                    "query": question,
+                    "safety": None,
+                    "error_detail": str(e)
+                }
             continue
-        
