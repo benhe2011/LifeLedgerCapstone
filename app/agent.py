@@ -310,7 +310,7 @@ def router(state: AgentState):
 
 # --- Main Interface ---
 
-async def ask_agent(db, user_id: str, question: str) -> Dict[str, Any]:
+async def ask_agent(db, user_id: str, question: str, history: list[dict] | None = None) -> Dict[str, Any]:
     """VLM-driven agent with LangGraph ReAct flow and UI-compatible serialization."""
     
     # 1. Content Safety: check user question (Prompt Shield)
@@ -339,12 +339,17 @@ async def ask_agent(db, user_id: str, question: str) -> Dict[str, Any]:
 
     for attempt in range(AGENT_MAX_RETRIES + 1):
         try:
-            # Initial state
+            # Initial state — prepend conversation history if provided
+            messages = []
+            if history:
+                messages.extend(history)
+            messages.append({"role": "user", "content": question})
+
             inputs = {
-                "messages": [{"role": "user", "content": question}], 
-                "db": db, 
-                "user_id": user_id, 
-                "sources": [], 
+                "messages": messages,
+                "db": db,
+                "user_id": user_id,
+                "sources": [],
                 "tool_trace": []
             }
             

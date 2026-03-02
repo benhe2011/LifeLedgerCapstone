@@ -139,6 +139,36 @@ async def create_tables():
             )
         """)
 
+        # Conversation memory tables
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS conversations (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                title TEXT,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_conversations_user
+            ON conversations(user_id)
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS conversation_messages (
+                id SERIAL PRIMARY KEY,
+                conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                documents JSONB,
+                session_id INTEGER REFERENCES regenerate_sessions(id),
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_conv_msgs
+            ON conversation_messages(conversation_id)
+        """)
+
 
 async def create_document(conn, user_id: str, s3_key: str) -> int:
     """Create a new document record."""
@@ -530,3 +560,76 @@ async def get_active_constraints(conn) -> List[Dict[str, Any]]:
         ORDER BY created_at
     """)
     return [{"rule": row["rule_text"], "type": row["rule_type"]} for row in rows]
+
+
+# --- Conversation Memory ---
+
+CONVERSATION_HISTORY_LIMIT = int(os.getenv("CONVERSATION_HISTORY_LIMIT", "6"))
+
+
+async def create_conversation(conn, user_id: str, title: str) -> int:
+    """Create a new conversation and return its ID."""
+    return await conn.fetchval(
+        """
+        INSERT INTO conversations (user_id, title)
+        VALUES ($1, $2)
+        RETURNING id
+        """,
+        user_id, title[:100],
+    )
+
+
+async def add_conversation_message(
+    conn, conversation_id: int, role: str, content: str,
+    documents: list = None, session_id: int = None,
+) -> int:
+    """Add a message to a conversation. Returns the message ID."""
+    return await conn.fetchval(
+        """
+        INSERT INTO conversation_messages (conversation_id, role, content, documents, session_id)
+        VALUES ($1, $2, $3, $4::jsonb, $5)
+        RETURNING id
+        """,
+        conversation_id, role, content,
+        json.dumps(documents) if documents else None,
+        session_id,
+    )
+
+
+async def get_conversation_history(
+    conn, conversation_id: int, user_id: str,
+) -> list:
+    """Get recent messages for a conversation, oldest first.
+
+    Limit controlled by CONVERSATION_HISTORY_LIMIT env var (default 6).
+    Validates ownership via user_id.
+    """
+    owner = await conn.fetchval(
+        "SELECT user_id FROM conversations WHERE id = $1",
+        conversation_id,
+    )
+    if owner != user_id:
+        return []
+
+    rows = await conn.fetch(
+        """
+        SELECT role, content FROM (
+            SELECT role, content, created_at
+            FROM conversation_messages
+            WHERE conversation_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+        ) sub
+        ORDER BY created_at ASC
+        """,
+        conversation_id, CONVERSATION_HISTORY_LIMIT,
+    )
+    return [{"role": row["role"], "content": row["content"]} for row in rows]
+
+
+async def update_conversation_timestamp(conn, conversation_id: int):
+    """Touch the updated_at timestamp."""
+    await conn.execute(
+        "UPDATE conversations SET updated_at = NOW() WHERE id = $1",
+        conversation_id,
+    )

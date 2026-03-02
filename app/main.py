@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from app.auth import get_current_user
 from app.s3 import upload_to_s3, generate_presigned_url, download_from_s3, delete_many_from_s3
-from app.db import get_db, create_tables, create_document, search_documents, get_user_documents, get_document_by_id, update_document, get_documents_for_delete, delete_document_records, get_upcoming_events, get_similar_documents, create_regenerate_session, log_regenerate_attempt, count_unmined_sessions
+from app.db import get_db, create_tables, create_document, search_documents, get_user_documents, get_document_by_id, update_document, get_documents_for_delete, delete_document_records, get_upcoming_events, get_similar_documents, create_regenerate_session, log_regenerate_attempt, count_unmined_sessions, create_conversation, add_conversation_message, get_conversation_history, update_conversation_timestamp
 from app.ocr_pipeline import process_image, process_batch_and_crawl
 from app.agent import ask_agent
 from app.radar_crawler import crawl_documents
@@ -100,6 +100,7 @@ class ProcessResponse(BaseModel):
 class SearchRequest(BaseModel):
     query: str
     limit: int = 10
+    conversation_id: int | None = None
 
 
 class AskRequest(BaseModel):
@@ -154,6 +155,7 @@ class SearchResult(BaseModel):
     documents: List[DocumentResponse]
     query: str
     session_id: int  # Feedback loop session ID for regeneration tracking
+    conversation_id: int  # Conversation memory session for follow-ups
     safety: Optional[SafetyInfo] = None
     groundedness: Optional[GroundednessInfo] = None
 
@@ -312,22 +314,43 @@ async def search(
 ):
     """
     Search documents using semantic similarity + agent answer.
-    Returns AI-generated answer + matching documents in frontend format.
+    Supports multi-turn conversation via optional conversation_id.
     """
-    # Get semantic search results
+    # 1. Handle conversation: create new or load existing history
+    history = []
+    conversation_id = request.conversation_id
+
+    if conversation_id:
+        history = await get_conversation_history(db, conversation_id, user_id)
+        if not history:
+            conversation_id = None  # invalid or not owned — start fresh
+
+    if not conversation_id:
+        conversation_id = await create_conversation(db, user_id, request.query)
+
+    # 2. Get semantic search results
     docs = await search_documents(db, user_id, request.query, request.limit)
 
-    # Generate agent answer
-    agent_result = await ask_agent(db, user_id, request.query)
+    # 3. Generate agent answer with conversation history
+    agent_result = await ask_agent(db, user_id, request.query, history=history)
 
-    # Create feedback loop session (attempt 0 = initial search response)
+    # 4. Create feedback loop session (attempt 0 = initial search response)
     session_id = await create_regenerate_session(
         db, user_id, request.query,
         agent_result["answer"],
         agent_result.get("tool_trace", []),
     )
 
-    # Transform to frontend Document format
+    # 5. Persist messages to conversation
+    await add_conversation_message(db, conversation_id, "user", request.query)
+    doc_ids = [str(doc["id"]) for doc in docs]
+    await add_conversation_message(
+        db, conversation_id, "assistant", agent_result["answer"],
+        documents=doc_ids, session_id=session_id,
+    )
+    await update_conversation_timestamp(db, conversation_id)
+
+    # 6. Transform to frontend Document format
     frontend_docs = []
     for doc in docs:
         file_url = await generate_presigned_url(doc["s3_key"])
@@ -356,6 +379,7 @@ async def search(
         documents=frontend_docs,
         query=request.query,
         session_id=session_id,
+        conversation_id=conversation_id,
         safety=safety,
         groundedness=groundedness,
     )
