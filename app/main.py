@@ -396,7 +396,7 @@ async def search(
                         status=_get_status(doc),
                         primaryEntity=_extract_primary_entity(doc),
                         secondaryEntity=None,
-                        primaryDate=doc.get("created_at", "")[:10],
+                        primaryDate=str(doc.get("created_at", ""))[:10],
                         totalValue=_extract_total_value(doc),
                     ))
         except Exception as e:
