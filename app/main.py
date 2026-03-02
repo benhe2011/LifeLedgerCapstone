@@ -6,7 +6,6 @@ Integration notes:
 - Frontend calls /process after upload to trigger OCR pipeline
 """
 import os
-import uuid as _uuid
 from contextlib import asynccontextmanager
 from typing import List, Optional, Dict, Any
 
@@ -379,14 +378,13 @@ async def search(
             valid_ids = []
             for cid in new_cited_ids:
                 try:
-                    _uuid.UUID(cid)
-                    valid_ids.append(cid)
-                except ValueError:
+                    valid_ids.append(int(cid))
+                except (ValueError, TypeError):
                     pass
             if valid_ids:
                 cited_docs = await db.fetch(
                     "SELECT id, s3_key, doc_type, doc_text, created_at, metadata "
-                    "FROM documents WHERE id = ANY($1::uuid[]) AND user_id = $2",
+                    "FROM documents WHERE id = ANY($1::int[]) AND user_id = $2",
                     valid_ids, user_id,
                 )
                 for doc in cited_docs:
