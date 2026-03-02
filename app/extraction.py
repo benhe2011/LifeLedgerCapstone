@@ -175,6 +175,30 @@ async def get_receipts_by_date_range(db, user_id: str, start_date: str, end_date
     ]
 
 
+async def get_all_receipt_texts(db, user_id: str, limit: int = 50) -> list:
+    """Get all receipt documents with their full OCR text for broad reasoning queries."""
+    sql = """
+        SELECT e.merchant, e.date, e.total_amount, d.id as doc_id, d.doc_text
+        FROM extractions e
+        JOIN documents d ON e.doc_id = d.id
+        WHERE d.user_id = $1
+          AND d.doc_text NOT IN ('[No text detected]', '[Processing failed]')
+        ORDER BY e.date DESC NULLS LAST
+        LIMIT $2
+    """
+    rows = await db.fetch(sql, user_id, limit)
+    return [
+        {
+            "merchant": r["merchant"],
+            "date": r["date"].isoformat() if r["date"] else None,
+            "total": float(r["total_amount"]) if r["total_amount"] else None,
+            "doc_id": r["doc_id"],
+            "items_text": r["doc_text"],
+        }
+        for r in rows
+    ]
+
+
 async def detect_recurring_costs(db, user_id: str) -> List[dict]:
     """Detect recurring charges by analyzing purchase intervals per merchant."""
     sql = """

@@ -13,6 +13,7 @@ from app.extraction import (
     get_spending_by_merchant,
     get_receipts_by_merchant,
     get_receipts_by_date_range,
+    get_all_receipt_texts,
     detect_recurring_costs,
     detect_trips,
 )
@@ -139,6 +140,19 @@ TOOLS = [
                 "properties": {}
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_all_receipt_texts",
+            "description": "Get all receipt documents with their full item-level text. Use for broad questions that need reasoning across ALL purchases (e.g., 'what unhealthy items did I buy', 'show me all electronics purchases', 'what did I buy most frequently'). Returns merchant, date, total, and full OCR text containing line items.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "Max receipts to return", "default": 50}
+                }
+            }
+        }
     }
 ]
 
@@ -210,6 +224,8 @@ async def execute_tool(db, user_id: str, tool_call: Any) -> str:
         result = await detect_recurring_costs(db, user_id)
     elif name == "get_trips":
         result = await detect_trips(db, user_id)
+    elif name == "get_all_receipt_texts":
+        result = await get_all_receipt_texts(db, user_id, args.get("limit", 50))
     else:
         result = {"error": f"Unknown tool: {name}"}
 
