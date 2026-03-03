@@ -443,6 +443,19 @@ async def delete_document_records(
         doc_ids
     )
 
+    # Remove deleted doc IDs from conversation_messages JSONB arrays
+    id_strings = [str(did) for did in doc_ids]
+    await conn.execute("""
+        UPDATE conversation_messages
+        SET documents = (
+            SELECT COALESCE(jsonb_agg(elem), '[]'::jsonb)
+            FROM jsonb_array_elements(documents) AS elem
+            WHERE elem::text NOT IN (SELECT unnest($1::text[]))
+        )
+        WHERE documents IS NOT NULL
+          AND documents != '[]'::jsonb
+    """, id_strings)
+
     # Delete documents
     await conn.execute(
         "DELETE FROM documents WHERE id = ANY($1::int[]) AND user_id = $2",

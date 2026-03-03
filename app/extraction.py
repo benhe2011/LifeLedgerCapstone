@@ -105,8 +105,8 @@ async def get_total_spending(db, user_id: str, start_date: str = None, end_date:
         FROM extractions e
         JOIN documents d ON e.doc_id = d.id
         WHERE d.user_id = $1
-          AND ($2::date IS NULL OR e.date >= $2::date)
-          AND ($3::date IS NULL OR e.date <= $3::date)
+          AND ($2::date IS NULL OR COALESCE(e.date, d.created_at::date) >= $2::date)
+          AND ($3::date IS NULL OR COALESCE(e.date, d.created_at::date) <= $3::date)
     """
     row = await db.fetchrow(sql, user_id, parse_date(start_date), parse_date(end_date))
     return {"total": float(row["total"]), "receipt_count": row["count"]}
@@ -119,8 +119,8 @@ async def get_spending_by_merchant(db, user_id: str, start_date: str = None, end
         FROM extractions e
         JOIN documents d ON e.doc_id = d.id
         WHERE d.user_id = $1 AND e.merchant IS NOT NULL
-          AND ($2::date IS NULL OR e.date >= $2::date)
-          AND ($3::date IS NULL OR e.date <= $3::date)
+          AND ($2::date IS NULL OR COALESCE(e.date, d.created_at::date) >= $2::date)
+          AND ($3::date IS NULL OR COALESCE(e.date, d.created_at::date) <= $3::date)
         GROUP BY e.merchant
         ORDER BY total DESC
         LIMIT $4

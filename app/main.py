@@ -810,10 +810,10 @@ async def analytics_spending(
 
     # Monthly totals
     rows = await db.fetch(
-        """SELECT TO_CHAR(e.date, 'YYYY-MM') as month, SUM(e.total_amount) as total
+        """SELECT TO_CHAR(COALESCE(e.date, d.created_at::date), 'YYYY-MM') as month, SUM(e.total_amount) as total
            FROM extractions e JOIN documents d ON e.doc_id = d.id
-           WHERE d.user_id = $1 AND e.total_amount IS NOT NULL AND e.date IS NOT NULL
-             AND e.date >= CURRENT_DATE - make_interval(months => $2)
+           WHERE d.user_id = $1 AND e.total_amount IS NOT NULL
+             AND COALESCE(e.date, d.created_at::date) >= CURRENT_DATE - make_interval(months => $2)
            GROUP BY month ORDER BY month""",
         user_id, months,
     )
