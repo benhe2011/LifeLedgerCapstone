@@ -115,7 +115,7 @@ async def get_total_spending(db, user_id: str, start_date: str = None, end_date:
 async def get_spending_by_merchant(db, user_id: str, start_date: str = None, end_date: str = None, limit: int = 10) -> list:
     """Get spending grouped by merchant."""
     sql = """
-        SELECT e.merchant, SUM(e.total_amount) as total, COUNT(*) as count
+        SELECT e.merchant, COALESCE(SUM(e.total_amount), 0) as total, COUNT(*) as count
         FROM extractions e
         JOIN documents d ON e.doc_id = d.id
         WHERE d.user_id = $1 AND e.merchant IS NOT NULL
