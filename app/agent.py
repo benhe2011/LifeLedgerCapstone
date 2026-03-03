@@ -207,6 +207,9 @@ async def build_system_prompt(db) -> str:
         for rule in answer_rules:
             prompt += f"- {rule}\n"
 
+    # Anchor: reinforce critical fixed rules after mined constraints
+    prompt += "\nReminder: Always end your answer with the <!--cited:doc_id1,doc_id2--> citation tag as described above."
+
     return prompt
 
 

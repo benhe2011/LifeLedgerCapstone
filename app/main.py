@@ -455,6 +455,12 @@ async def regenerate(
         agent_result.get("tool_trace", []),
     )
 
+    # Update conversation history so follow-ups see the accepted answer
+    await db.execute(
+        "UPDATE conversation_messages SET content = $1 WHERE session_id = $2 AND role = 'assistant'",
+        agent_result["answer"], request.session_id,
+    )
+
     # Auto-trigger constraint mining when threshold is reached
     unmined = await count_unmined_sessions(db)
     if unmined >= MINING_THRESHOLD:
