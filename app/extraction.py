@@ -115,7 +115,8 @@ async def get_total_spending(db, user_id: str, start_date: str = None, end_date:
 async def get_spending_by_merchant(db, user_id: str, start_date: str = None, end_date: str = None, limit: int = 10) -> list:
     """Get spending grouped by merchant."""
     sql = """
-        SELECT e.merchant, COALESCE(SUM(e.total_amount), 0) as total, COUNT(*) as count
+        SELECT e.merchant, COALESCE(SUM(e.total_amount), 0) as total, COUNT(*) as count,
+               array_agg(DISTINCT d.id) as doc_ids
         FROM extractions e
         JOIN documents d ON e.doc_id = d.id
         WHERE d.user_id = $1 AND e.merchant IS NOT NULL
@@ -126,7 +127,8 @@ async def get_spending_by_merchant(db, user_id: str, start_date: str = None, end
         LIMIT $4
     """
     rows = await db.fetch(sql, user_id, parse_date(start_date), parse_date(end_date), limit)
-    return [{"merchant": r["merchant"], "total": float(r["total"]), "count": r["count"]} for r in rows]
+    return [{"merchant": r["merchant"], "total": float(r["total"]), "count": r["count"],
+             "doc_ids": [str(did) for did in r["doc_ids"]]} for r in rows]
 
 
 async def get_receipts_by_merchant(db, user_id: str, merchant: str, limit: int = 20) -> list:

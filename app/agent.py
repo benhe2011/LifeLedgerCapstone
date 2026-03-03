@@ -51,7 +51,7 @@ def extract_cited_sources(answer: str) -> tuple[str, list[str]]:
     def _collect(m):
         cited_ids.extend(s.strip() for s in m.group(1).split(',') if s.strip())
         return ''
-    clean_answer = re.sub(r'<!--cited:([\w,\-]+)-->', _collect, answer).rstrip()
+    clean_answer = re.sub(r'<!--cited:(.*?)-->', _collect, answer).rstrip()
     return clean_answer, cited_ids
 
 
