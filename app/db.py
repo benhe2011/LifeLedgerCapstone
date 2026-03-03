@@ -562,12 +562,11 @@ MAX_PROMPT_CONSTRAINTS = int(os.getenv("MAX_PROMPT_CONSTRAINTS", "10"))
 
 
 async def get_active_constraints(conn) -> List[Dict[str, Any]]:
-    """Get active prompt constraints, limited to most recent within 30 days."""
+    """Get active prompt constraints, limited to most recent."""
     rows = await conn.fetch("""
         SELECT rule_text, rule_type
         FROM prompt_constraints
         WHERE active = TRUE
-          AND created_at > NOW() - INTERVAL '30 days'
         ORDER BY created_at DESC
         LIMIT $1
     """, MAX_PROMPT_CONSTRAINTS)
