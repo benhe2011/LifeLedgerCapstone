@@ -150,6 +150,14 @@ class GroundednessInfo(BaseModel):
     message: str
 
 
+class ChartDataItem(BaseModel):
+    """A single chart visualization to render in the frontend."""
+    type: str
+    title: str
+    data: List[Dict[str, Any]]
+    summary: Optional[Dict[str, Any]] = None
+
+
 class SearchResult(BaseModel):
     answer: str
     documents: List[DocumentResponse]
@@ -158,6 +166,7 @@ class SearchResult(BaseModel):
     conversation_id: int  # Conversation memory session for follow-ups
     safety: Optional[SafetyInfo] = None
     groundedness: Optional[GroundednessInfo] = None
+    chart_data: Optional[List[ChartDataItem]] = None
 
 
 class AskResponse(BaseModel):
@@ -175,6 +184,7 @@ class RegenerateResult(BaseModel):
     answer: str
     safety: Optional[SafetyInfo] = None
     groundedness: Optional[GroundednessInfo] = None
+    chart_data: Optional[List[ChartDataItem]] = None
 
 class RejectedFile(BaseModel):
     """A file rejected by content safety moderation."""
@@ -410,6 +420,10 @@ async def search(
     if agent_result.get("groundedness"):
         groundedness = GroundednessInfo(**agent_result["groundedness"])
 
+    chart_data = None
+    if agent_result.get("chart_data"):
+        chart_data = [ChartDataItem(**c) for c in agent_result["chart_data"]]
+
     return SearchResult(
         answer=agent_result["answer"],
         documents=frontend_docs,
@@ -418,6 +432,7 @@ async def search(
         conversation_id=conversation_id,
         safety=safety,
         groundedness=groundedness,
+        chart_data=chart_data,
     )
 
 
@@ -469,10 +484,15 @@ async def regenerate(
     if agent_result.get("groundedness"):
         groundedness = GroundednessInfo(**agent_result["groundedness"])
 
+    chart_data = None
+    if agent_result.get("chart_data"):
+        chart_data = [ChartDataItem(**c) for c in agent_result["chart_data"]]
+
     return RegenerateResult(
         answer=agent_result["answer"],
         safety=safety,
         groundedness=groundedness,
+        chart_data=chart_data,
     )
 
 

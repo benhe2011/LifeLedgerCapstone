@@ -55,6 +55,58 @@ def extract_cited_sources(answer: str) -> tuple[str, list[str]]:
     return clean_answer, cited_ids
 
 
+CHARTABLE_TOOLS = {
+    "get_spending_by_merchant": "spending_by_merchant",
+    "get_receipts_by_date_range": "spending_over_time",
+    "get_receipts_by_merchant": "receipt_table",
+}
+
+
+def extract_chart_data(tool_results: list) -> list | None:
+    """Inspect tool results and build chart_data entries for frontend rendering."""
+    charts = []
+    for tr in tool_results:
+        chart_type = CHARTABLE_TOOLS.get(tr["tool"])
+        data = tr.get("data")
+        if not chart_type or not data or not isinstance(data, list) or len(data) == 0:
+            continue
+
+        if chart_type == "spending_by_merchant":
+            charts.append({
+                "type": "spending_by_merchant",
+                "title": "Spending by Merchant",
+                "data": data,
+            })
+
+        elif chart_type == "spending_over_time":
+            from collections import defaultdict
+            monthly: dict[str, float] = defaultdict(float)
+            for r in data:
+                if r.get("date") and r.get("total"):
+                    monthly[r["date"][:7]] += r["total"]
+            if monthly:
+                charts.append({
+                    "type": "spending_over_time",
+                    "title": "Spending Over Time",
+                    "data": [{"month": m, "total": round(t, 2)} for m, t in sorted(monthly.items())],
+                })
+            charts.append({
+                "type": "receipt_table",
+                "title": "Receipts",
+                "data": data,
+            })
+
+        elif chart_type == "receipt_table":
+            merchant = tr.get("args", {}).get("merchant", "")
+            charts.append({
+                "type": "receipt_table",
+                "title": f"Receipts from {merchant}" if merchant else "Receipts",
+                "data": data,
+            })
+
+    return charts if charts else None
+
+
 TOOLS = [
     {
         "type": "function",
@@ -253,6 +305,7 @@ class AgentState(TypedDict):
     user_id: str
     sources: Annotated[List[str], add]
     tool_trace: Annotated[List[Dict[str, Any]], add]
+    tool_results: Annotated[List[Dict[str, Any]], add]
     final_result: Dict[str, Any]
 
 async def call_model(state: AgentState):
@@ -278,7 +331,8 @@ async def call_tools(state: AgentState):
     new_messages = []
     new_sources = []
     new_traces = []
-    
+    new_tool_results = []
+
     task_risk = await check_task_adherence(TOOLS, state["messages"])
     if task_risk is True:
         logger.warning(
@@ -286,11 +340,11 @@ async def call_tools(state: AgentState):
             state["user_id"],
             [tc.function.name for tc in last_msg.tool_calls],
             )
-    
+
     for tool_call in last_msg.tool_calls:
         result_str = await execute_tool(state["db"], state["user_id"], tool_call)
         new_messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result_str})
-        
+
         try:
             args = json.loads(tool_call.function.arguments)
         except:
@@ -309,9 +363,16 @@ async def call_tools(state: AgentState):
                 for item in data:
                     if "doc_id" in item: new_sources.append(str(item["doc_id"]))
                     elif "id" in item: new_sources.append(str(item["id"]))
-        except: pass
+        except:
+            data = None
 
-    return {"messages": new_messages, "sources": new_sources, "tool_trace": new_traces}
+        new_tool_results.append({
+            "tool": tool_call.function.name,
+            "args": args,
+            "data": data if isinstance(data, (list, dict)) else None,
+        })
+
+    return {"messages": new_messages, "sources": new_sources, "tool_trace": new_traces, "tool_results": new_tool_results}
 
 def router(state: AgentState):
     last_msg = state["messages"][-1]
@@ -364,7 +425,8 @@ async def ask_agent(db, user_id: str, question: str, history: list[dict] | None 
                 "db": db,
                 "user_id": user_id,
                 "sources": [],
-                "tool_trace": []
+                "tool_trace": [],
+                "tool_results": [],
             }
             
             output = await graph.ainvoke(inputs)
@@ -419,6 +481,7 @@ async def ask_agent(db, user_id: str, question: str, history: list[dict] | None 
 
             # 6. Final Serialization aligned with "OLD" working UI schema
             clean_answer, cited_sources = extract_cited_sources(str(final_answer))
+            chart_data = extract_chart_data(output.get("tool_results", []))
             clean_result = {
                 "answer": clean_answer,
                 "documents": list(set(str(s) for s in output.get("sources", []))),
@@ -426,7 +489,8 @@ async def ask_agent(db, user_id: str, question: str, history: list[dict] | None 
                 "query": question,
                 "session_id": None,  # Populated by the calling route handler
                 "safety": None,      # UI expects null when everything is safe
-                "groundedness": groundedness_info
+                "groundedness": groundedness_info,
+                "chart_data": chart_data,
             }
 
             # Optionally include tool_trace if needed for internal logging/debugging
