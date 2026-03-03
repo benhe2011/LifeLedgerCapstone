@@ -49,6 +49,12 @@ Each rule should be one of two types:
 - "tool_selection": guidance on which tool to use for which type of query
 - "answer_generation": guidance on how to format, phrase, or structure answers
 
+IMPORTANT — Do NOT extract rules that:
+- Change the overall response structure or format (e.g. "always use bullet points", "keep answers under N sentences")
+- Contradict the agent's core numbered instructions (tool usage, citation tags, date handling)
+- Affect how the agent tags or cites sources
+Focus only on domain-specific improvements: which tool to pick for a query type, what data to include in answers, how to phrase domain-specific information.
+
 Output a JSON array of rules. Each rule should be actionable and concise.
 Example format:
 [

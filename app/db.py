@@ -533,6 +533,13 @@ async def save_prompt_constraints(conn, constraints: List[Dict[str, Any]], sessi
     """Save mined constraints and mark sessions as mined. Returns count saved."""
     count = 0
     for c in constraints:
+        # Skip exact duplicates
+        existing = await conn.fetchval(
+            "SELECT id FROM prompt_constraints WHERE rule_text = $1 AND active = TRUE",
+            c["rule"],
+        )
+        if existing:
+            continue
         await conn.execute(
             """
             INSERT INTO prompt_constraints (rule_text, rule_type, source_session_ids)
@@ -551,14 +558,19 @@ async def save_prompt_constraints(conn, constraints: List[Dict[str, Any]], sessi
     return count
 
 
+MAX_PROMPT_CONSTRAINTS = int(os.getenv("MAX_PROMPT_CONSTRAINTS", "10"))
+
+
 async def get_active_constraints(conn) -> List[Dict[str, Any]]:
-    """Get all active prompt constraints, ordered by creation time."""
+    """Get active prompt constraints, limited to most recent within 30 days."""
     rows = await conn.fetch("""
         SELECT rule_text, rule_type
         FROM prompt_constraints
         WHERE active = TRUE
-        ORDER BY created_at
-    """)
+          AND created_at > NOW() - INTERVAL '30 days'
+        ORDER BY created_at DESC
+        LIMIT $1
+    """, MAX_PROMPT_CONSTRAINTS)
     return [{"rule": row["rule_text"], "type": row["rule_type"]} for row in rows]
 
 
