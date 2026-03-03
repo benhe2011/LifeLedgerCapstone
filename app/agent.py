@@ -126,7 +126,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_total_spending",
-            "description": "Get total spending amount. Use for 'how much did I spend' questions. Omit dates to query ALL TIME.",
+            "description": "Get ONLY a single total spending number. Use ONLY when the user wants just a grand total. For breakdowns, trends, or 'show my spending' questions, prefer get_spending_by_merchant or get_receipts_by_date_range instead. Omit dates to query ALL TIME.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -140,7 +140,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_spending_by_merchant",
-            "description": "Get spending broken down by merchant/store. Use for 'where do I spend the most' questions. Omit dates to query ALL TIME.",
+            "description": "Get spending broken down by merchant/store. Use for 'where do I spend the most', 'show my spending', or any spending overview questions. Omit dates to query ALL TIME.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -170,7 +170,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_receipts_by_date_range",
-            "description": "Get all receipts in a date range. Use for 'receipts from last month' type questions.",
+            "description": "Get all receipts in a date range with dates and amounts. Use for spending trends, timelines, 'show my spending over time', or 'receipts from last month' type questions.",
             "parameters": {
                 "type": "object",
                 "properties": {
