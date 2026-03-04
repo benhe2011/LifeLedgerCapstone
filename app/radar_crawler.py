@@ -82,26 +82,30 @@ async def get_unprocessed_documents(db, user_id: str | None = None, limit: int =
     """
     if user_id:
         query = """
-            SELECT id, user_id, doc_text
-            FROM documents
-            WHERE user_id = $1
-              AND doc_text IS NOT NULL
-              AND doc_text != ''
-              AND doc_text != '[Processing failed]'
-              AND (radar_processed = FALSE OR radar_processed IS NULL)
-            ORDER BY created_at DESC
+            SELECT d.id, d.user_id, d.doc_text,
+                   COALESCE(e.date, d.created_at::date) as doc_date
+            FROM documents d
+            LEFT JOIN extractions e ON e.doc_id = d.id
+            WHERE d.user_id = $1
+              AND d.doc_text IS NOT NULL
+              AND d.doc_text != ''
+              AND d.doc_text != '[Processing failed]'
+              AND (d.radar_processed = FALSE OR d.radar_processed IS NULL)
+            ORDER BY d.created_at DESC
             LIMIT $2
         """
         rows = await db.fetch(query, user_id, limit)
     else:
         query = """
-            SELECT id, user_id, doc_text
-            FROM documents
-            WHERE doc_text IS NOT NULL
-              AND doc_text != ''
-              AND doc_text != '[Processing failed]'
-              AND (radar_processed = FALSE OR radar_processed IS NULL)
-            ORDER BY created_at DESC
+            SELECT d.id, d.user_id, d.doc_text,
+                   COALESCE(e.date, d.created_at::date) as doc_date
+            FROM documents d
+            LEFT JOIN extractions e ON e.doc_id = d.id
+            WHERE d.doc_text IS NOT NULL
+              AND d.doc_text != ''
+              AND d.doc_text != '[Processing failed]'
+              AND (d.radar_processed = FALSE OR d.radar_processed IS NULL)
+            ORDER BY d.created_at DESC
             LIMIT $1
         """
         rows = await db.fetch(query, limit)
@@ -165,7 +169,8 @@ async def crawl_documents(user_id: str | None = None, limit: int = 50) -> Dict[s
 
                 # Call text-only LLM
                 logger.info(f"Radar crawler: extracting events from doc {doc['id']}")
-                result = await extract_event_from_text(doc_text)
+                doc_date = doc.get("doc_date")
+                result = await extract_event_from_text(doc_text, doc_date=doc_date)
 
                 if result and result.get("event_date"):
                     await update_document_event(

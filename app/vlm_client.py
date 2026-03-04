@@ -113,7 +113,7 @@ Example: {"merchant": "Target", "date": "2024-01-15", "total_amount": 45.99, "ad
         return None
 
 
-async def extract_event_from_text(doc_text: str) -> Dict[str, Any] | None:
+async def extract_event_from_text(doc_text: str, doc_date=None) -> Dict[str, Any] | None:
     """Extract event date from document text using text-only LLM (cheap/fast).
 
     Used by the radar crawler to identify upcoming dates without vision calls.
@@ -129,7 +129,9 @@ async def extract_event_from_text(doc_text: str) -> Dict[str, Any] | None:
                 "content": f"""Extract upcoming/future dates from this document text.
 Look for: due dates, renewal dates, expiration dates, deadlines, appointment dates.
 
-Today's date is {date.today().isoformat()}. Use this to resolve relative dates like "tomorrow", "next week", "in 3 days".
+This document is dated {doc_date.isoformat() if doc_date else 'unknown'}. Today's date is {date.today().isoformat()}.
+For relative deadlines like "within 14 days" or "in 30 days", calculate from the DOCUMENT date, not today.
+For absolute dates, use them directly.
 
 Respond in JSON:
 {{
@@ -139,7 +141,7 @@ Respond in JSON:
 }}
 
 If multiple future dates exist, return the SOONEST one.
-Only extract FUTURE dates. Ignore past dates (receipts, purchase dates)."""
+Only extract FUTURE dates (relative to today). Ignore dates that have already passed."""
             },
             {"role": "user", "content": doc_text}
         ],
