@@ -201,6 +201,58 @@ async def get_all_receipt_texts(db, user_id: str, limit: int = 50) -> list:
     ]
 
 
+async def get_document_overview(db, user_id: str, limit: int = 50) -> list:
+    """Get overview of all documents with optional extraction metadata."""
+    sql = """
+        SELECT d.id as doc_id, d.doc_type, d.created_at,
+               e.merchant, e.date, e.total_amount
+        FROM documents d
+        LEFT JOIN extractions e ON e.doc_id = d.id
+        WHERE d.user_id = $1
+        ORDER BY d.created_at DESC
+        LIMIT $2
+    """
+    rows = await db.fetch(sql, user_id, limit)
+    return [
+        {
+            "doc_id": r["doc_id"],
+            "doc_type": r["doc_type"],
+            "uploaded": r["created_at"].isoformat() if r["created_at"] else None,
+            "merchant": r["merchant"],
+            "date": r["date"].isoformat() if r["date"] else None,
+            "total": float(r["total_amount"]) if r["total_amount"] else None,
+        }
+        for r in rows
+    ]
+
+
+async def get_all_document_texts(db, user_id: str, limit: int = 30) -> list:
+    """Get all documents with OCR text, including non-receipt docs like flyers, notes, screenshots."""
+    sql = """
+        SELECT d.id as doc_id, d.doc_type, d.doc_text, d.created_at,
+               e.merchant, e.date, e.total_amount
+        FROM documents d
+        LEFT JOIN extractions e ON e.doc_id = d.id
+        WHERE d.user_id = $1
+          AND d.doc_text NOT IN ('[No text detected]', '[Processing failed]')
+        ORDER BY d.created_at DESC
+        LIMIT $2
+    """
+    rows = await db.fetch(sql, user_id, limit)
+    return [
+        {
+            "doc_id": r["doc_id"],
+            "doc_type": r["doc_type"],
+            "uploaded": r["created_at"].isoformat() if r["created_at"] else None,
+            "merchant": r["merchant"],
+            "date": r["date"].isoformat() if r["date"] else None,
+            "total": float(r["total_amount"]) if r["total_amount"] else None,
+            "text": r["doc_text"],
+        }
+        for r in rows
+    ]
+
+
 async def detect_recurring_costs(db, user_id: str) -> List[dict]:
     """Detect recurring charges by analyzing purchase intervals per merchant."""
     sql = """
