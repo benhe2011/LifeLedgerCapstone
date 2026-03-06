@@ -73,9 +73,19 @@ async def create_tables():
             )
         """)
 
+        # Add phash column for upload-time deduplication (safe if already exists)
+        await conn.execute("""
+            ALTER TABLE documents ADD COLUMN IF NOT EXISTS phash TEXT
+        """)
+
         # Create index on user_id
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_documents_user_id ON documents(user_id)
+        """)
+
+        # Create index for phash deduplication lookups
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_documents_user_phash ON documents(user_id, phash)
         """)
 
         # Create vector index for similarity search
@@ -170,14 +180,14 @@ async def create_tables():
         """)
 
 
-async def create_document(conn, user_id: str, s3_key: str) -> int:
+async def create_document(conn, user_id: str, s3_key: str, phash: str | None = None) -> int:
     """Create a new document record."""
     query = """
-        INSERT INTO documents (user_id, s3_key)
-        VALUES ($1, $2)
+        INSERT INTO documents (user_id, s3_key, phash)
+        VALUES ($1, $2, $3)
         RETURNING id
     """
-    return await conn.fetchval(query, user_id, s3_key)
+    return await conn.fetchval(query, user_id, s3_key, phash)
 
 
 async def update_document(

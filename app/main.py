@@ -20,6 +20,7 @@ from app.ocr_pipeline import process_image, process_batch_and_crawl
 from app.agent import ask_agent
 from app.radar_crawler import crawl_documents
 from app.content_safety import moderate_image, moderate_user_text
+from app.dedup import compute_phash, check_duplicate
 from app.extraction import (
     get_spending_by_merchant,
     detect_recurring_costs,
@@ -260,8 +261,16 @@ async def upload_images(
             rejected.append({"filename": file.filename, "message": gate_result.message})
             continue
 
+        # ── Deduplication: exact pHash check ──
+        phash = compute_phash(content)
+        existing_id = await check_duplicate(db, user_id, phash)
+        if existing_id:
+            logger.info("Duplicate detected for %s (matches doc %d)", file.filename, existing_id)
+            rejected.append({"filename": file.filename, "message": "This document has already been uploaded."})
+            continue
+
         s3_key = await upload_to_s3(content, user_id, file.filename)
-        doc_id = await create_document(db, user_id, s3_key)
+        doc_id = await create_document(db, user_id, s3_key, phash=phash)
         uploaded.append({"doc_id": doc_id, "s3_key": s3_key, "filename": file.filename})
 
     return {"uploaded": uploaded, "count": len(uploaded), "rejected": rejected}
@@ -293,10 +302,18 @@ async def upload_and_process(
             rejected.append(RejectedFile(filename=file.filename, message=gate_result.message))
             continue
 
+        # ── Deduplication: exact pHash check ──
+        phash = compute_phash(content)
+        existing_id = await check_duplicate(db, user_id, phash)
+        if existing_id:
+            logger.info("Duplicate detected for %s (matches doc %d)", file.filename, existing_id)
+            rejected.append(RejectedFile(filename=file.filename, message="This document has already been uploaded."))
+            continue
+
         s3_key = await upload_to_s3(content, user_id, file.filename)
 
-        # Create DB record
-        doc_id = await create_document(db, user_id, s3_key)
+        # Create DB record with phash
+        doc_id = await create_document(db, user_id, s3_key, phash=phash)
 
         uploaded.append({
             "doc_id": doc_id,
@@ -306,7 +323,8 @@ async def upload_and_process(
         })
 
     # Single background task for batch + crawler
-    background_tasks.add_task(process_batch_and_crawl, uploaded, user_id)
+    if uploaded:
+        background_tasks.add_task(process_batch_and_crawl, uploaded, user_id)
 
     return UploadAndProcessResponse(
         uploaded=uploaded,
