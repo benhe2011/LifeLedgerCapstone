@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 AGENT_TEMPERATURE = float(os.getenv("AGENT_TEMPERATURE", "0.3"))
 AGENT_MAX_RETRIES = int(os.getenv("AGENT_MAX_RETRIES", "0"))
 DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4")
+# Check safety break to prevent infinite loops (e.g., max n reroutes)
+REROUTES = 2
 
 def repair_json(s: str) -> str:
     """Attempt to fix common JSON issues from truncated LLM output."""
@@ -247,6 +249,24 @@ TOOLS = [
     }
 ]
 
+TOOL_BUCKETS = {
+    "spending": ["get_total_spending", "get_spending_by_merchant", "get_receipts_by_date_range", "get_recurring_costs"],
+    "search": ["search_documents", "get_document_overview", "get_all_document_texts", "get_all_receipt_texts"],
+    "travel": ["get_trips"]
+}
+
+REROUTE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "request_category_change",
+        "description": "Call this ONLY if the current tool category is wrong or you need tools from a different category.",
+        "parameters": {
+            "type": "object",
+            "properties": {"reason": {"type": "string"}},
+            "required": ["reason"]
+        }
+    }
+}
 
 SYSTEM_PROMPT_BASE = """You are a helpful assistant that analyzes the user's screenshots, images, documents and receipts.
 All uploaded content is stored as searchable documents.
@@ -262,13 +282,14 @@ When answering questions:
 6. CRITICAL — Source citation: You MUST end every answer with a citation tag listing the doc_ids of documents you used. Format: <!--cited:doc_id1,doc_id2,doc_id3-->
    Example: If tool results included documents with doc_id "abc-123" and "def-456" and you referenced both, end your answer with: <!--cited:abc-123,def-456-->
    Only cite documents whose data you directly used. This tag is required even if you only used one document.
+7. CRITICAL: Do NOT invent items. Only list products explicitly found in the provided tool results. If the tool result does not contain a line-item breakdown, state that you can only see the total amount.
 
 Today's date is {today}. Use this to interpret relative dates like "last month" or "this year"."""
 
 
-async def build_system_prompt(db) -> str:
+async def build_system_prompt(db, category: str) -> str:
     """Build system prompt with base instructions + mined constraints."""
-    prompt = SYSTEM_PROMPT_BASE.format(today=date.today().isoformat())
+    prompt = SYSTEM_PROMPT_BASE.format(today=date.today().isoformat(), category=category)
     
     constraints = await get_active_constraints(db)
     if not constraints:
@@ -293,6 +314,7 @@ async def build_system_prompt(db) -> str:
     return prompt
 
 
+
 async def execute_tool(db, user_id: str, tool_call: Any) -> str:
     """Execute a tool call and return JSON result."""
     name = tool_call.function.name
@@ -306,6 +328,8 @@ async def execute_tool(db, user_id: str, tool_call: Any) -> str:
             args = json.loads(repair_json(raw_args))
         except json.JSONDecodeError as e:
             return json.dumps({"error": f"Invalid tool arguments: {e}"})
+    
+    logger.info(f"AGENT_ACTION: Executing {name} with args {args}")
 
     if name == "search_documents":
         result = await search_documents(db, user_id, args["query"], limit=5)
@@ -341,7 +365,60 @@ class AgentState(TypedDict):
     sources: Annotated[List[str], add]
     tool_trace: Annotated[List[Dict[str, Any]], add]
     tool_results: Annotated[List[Dict[str, Any]], add]
+    selected_category: str     # Tracking the active bucket
+    reroute_count: int         # Safety to prevent infinite re-routing
     final_result: Dict[str, Any]
+
+async def route_query(state: AgentState):
+    client = AsyncAzureOpenAI(
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+        api_key=os.getenv("AZURE_OPENAI_KEY"),
+        api_version="2024-02-15-preview"
+    )
+    
+    # Router Tool forces a choice including 'none'
+    router_tool = {
+        "type": "function",
+        "function": {
+            "name": "select_category",
+            "description": "Select the tool category. Use 'none' for greetings or general chat.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "enum": list(TOOL_BUCKETS.keys()) + ["none"]}
+                },
+                "required": ["category"]
+            }
+        }
+    }
+
+    router_prompt = f"""You are a Tool Router. Analyze the user's request and the ENTIRE conversation history to pick the best category.
+
+    CATEGORIES:
+    - 'spending': Use for totals, aggregate spending, trends, or merchant-level summaries (how much, where, when).
+    - 'search': Use for specific items, products, line-item details, or "what" was purchased (what did I buy, item list).
+    - 'travel': Use for trips, vacations, hotel bookings, or flight clusters.
+    - 'none': Use for greetings, general chat, or questions requiring no data.
+
+    RE-ROUTING LOGIC (CRITICAL):
+    1. Check if the most recent Assistant message called 'request_category_change'. 
+    2. If it did, look at the 'reason' provided and switch the category to the one that contains the missing tools.
+    3. If the user asks for "items," "products," or "line details" and you are currently in 'spending', you MUST switch to 'search'.
+    4. If the user asks about a "trip" or "vacation" and you are in 'spending' or 'search', you MUST switch to 'travel'.
+    5. Today's Date: {date.today().isoformat()}"""
+
+    response = await client.chat.completions.create(
+        model=DEPLOYMENT,
+        messages=[{"role": "system", "content": router_prompt}] + state["messages"],
+        tools=[router_tool],
+        tool_choice={"type": "function", "function": {"name": "select_category"}}
+    )
+    
+    args = json.loads(response.choices[0].message.tool_calls[0].function.arguments)
+    return {
+        "selected_category": args["category"], 
+        "reroute_count": state.get("reroute_count", 0)
+    }
 
 async def call_model(state: AgentState):
     client = AsyncAzureOpenAI(
@@ -349,74 +426,129 @@ async def call_model(state: AgentState):
         api_key=os.getenv("AZURE_OPENAI_KEY"),
         api_version="2024-02-15-preview"
     )
-    sys_prompt = await build_system_prompt(state["db"])
-    msgs = [{"role": "system", "content": sys_prompt}] + state["messages"]
+    cat = state.get("selected_category", "none")
+    # 1. Filter tools by category
+    current_tools = [t for t in TOOLS if t["function"]["name"] in TOOL_BUCKETS.get(cat, [])]
     
+    # 2. Add Re-route tool (unless it's a general chat or we've looped too much)
+    if cat != "none" and state.get("reroute_count", 0) < 2:
+        current_tools.append(REROUTE_TOOL)
+    
+    sys_prompt = await build_system_prompt(state["db"], cat)
     response = await client.chat.completions.create(
         model=DEPLOYMENT,
-        messages=msgs,
-        tools=TOOLS,
-        tool_choice="auto",
-        temperature=AGENT_TEMPERATURE
+        messages=[{"role": "system", "content": sys_prompt}] + state["messages"],
+        tools=current_tools if current_tools else None,
+        tool_choice="auto" if current_tools else None
     )
     return {"messages": [response.choices[0].message]}
 
 async def call_tools(state: AgentState):
+    """Executes tool calls, handles Re-route requests, and updates state."""
     last_msg = state["messages"][-1]
     new_messages = []
     new_sources = []
     new_traces = []
     new_tool_results = []
+    
+    # Track if any tool call in this batch is a Re-route request
+    is_rerouting = False
 
+    # Perform task adherence check (Safety)
     task_risk = await check_task_adherence(TOOLS, state["messages"])
     if task_risk is True:
-        logger.warning(
-            "Task adherence risk for user=%s, tool_calls=%s",
-            state["user_id"],
-            [tc.function.name for tc in last_msg.tool_calls],
-            )
+        logger.warning("Task adherence risk for user=%s", state["user_id"])
 
     for tool_call in last_msg.tool_calls:
-        result_str = await execute_tool(state["db"], state["user_id"], tool_call)
-        new_messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result_str})
+        name = tool_call.function.name
+        raw_args = tool_call.function.arguments
 
-        try:
-            args = json.loads(tool_call.function.arguments)
-        except:
-            args = tool_call.function.arguments
+        # --- 1. Handle Re-route (Category Change) ---
+        if name == "request_category_change":
+            is_rerouting = True
+            result_str = json.dumps({"status": "switching_category", "message": "System is reloading tools for a different category."})
+            args = {"reason": "User requested or model identified category mismatch"}
+        
+        # --- 2. Handle Standard Tools ---
+        else:
+            result_str = await execute_tool(state["db"], state["user_id"], tool_call)
+            try:
+                args = json.loads(raw_args)
+            except:
+                args = raw_args
 
+        # Append to tool messages for LLM context
+        new_messages.append({
+            "role": "tool", 
+            "tool_call_id": tool_call.id, 
+            "content": result_str
+        })
+
+        # --- 3. Build Trace & Metadata ---
         new_traces.append({
-            "tool": tool_call.function.name,
+            "tool": name,
             "args": args,
             "result_summary": result_str[:500],
             "task_adherence_risk": bool(task_risk)
         })
 
-        try:
-            data = json.loads(result_str)
-            if isinstance(data, list):
-                for item in data:
-                    if "doc_id" in item: new_sources.append(str(item["doc_id"]))
-                    elif "id" in item: new_sources.append(str(item["id"]))
-        except:
-            data = None
+        # Extract IDs for UI Citations (only for data tools, skip for re-route)
+        if name != "request_category_change":
+            try:
+                data = json.loads(result_str)
+                if isinstance(data, list):
+                    for item in data:
+                        if "doc_id" in item: new_sources.append(str(item["doc_id"]))
+                        elif "id" in item: new_sources.append(str(item["id"]))
+                
+                new_tool_results.append({
+                    "tool": name,
+                    "args": args,
+                    "data": data if isinstance(data, (list, dict)) else None,
+                })
+            except:
+                pass
 
-        new_tool_results.append({
-            "tool": tool_call.function.name,
-            "args": args,
-            "data": data if isinstance(data, (list, dict)) else None,
-        })
+    # Update state: Increment reroute_count if we are looping back to the Router
+    current_reroutes = state.get("reroute_count", 0)
+    if is_rerouting:
+        current_reroutes += 1
 
-    return {"messages": new_messages, "sources": new_sources, "tool_trace": new_traces, "tool_results": new_tool_results}
+    return {
+        "messages": new_messages, 
+        "sources": new_sources, 
+        "tool_trace": new_traces, 
+        "tool_results": new_tool_results,
+        "reroute_count": current_reroutes
+    }
+
 
 def router(state: AgentState):
+    """
+    Conditional logic to determine the next node in the graph.
+    Returns: 'tools', 're-route', or END.
+    """
     last_msg = state["messages"][-1]
-    # If the LLM generated tool calls, go to tools
+    
+    # Check if the Assistant wants to call any tools
     if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+        # Check specifically for the Re-route tool call
+        for tc in last_msg.tool_calls:
+            if tc.function.name == "request_category_change":
+                # Check safety break to prevent infinite loops (e.g., max 2 reroutes)
+                if state.get("reroute_count", 0) < REROUTES:
+                    return "re-route"
+                else:
+                    logger.warning("Max reroutes reached for user %s. Forcing END.", state["user_id"])
+                    return END
+        
+        # If any other tool is called, go to the standard tools node
         return "tools"
-    # If it's a Tool message or an Assistant message with content, the loop continues 
-    # until the Assistant provides a final text response without tool calls.
+    
+    # If no tools were called, the Assistant has provided a final answer (Escape Hatch)
     return END
+
+
 
 # --- Main Interface ---
 
@@ -440,10 +572,20 @@ async def ask_agent(db, user_id: str, question: str, history: list[dict] | None 
 
     # 2. Build the LangGraph Workflow
     workflow = StateGraph(AgentState)
+    workflow.add_node("router", route_query)
     workflow.add_node("agent", call_model)
     workflow.add_node("tools", call_tools)
-    workflow.set_entry_point("agent")
-    workflow.add_conditional_edges("agent", router)
+    workflow.set_entry_point("router")
+    workflow.add_edge("router", "agent")
+    workflow.add_conditional_edges(
+        "agent", 
+        router,
+        {
+            "tools": "tools",
+            "re-route": "router",              # MAP THIS to "router"
+            END: END
+        }
+    )
     workflow.add_edge("tools", "agent")
     graph = workflow.compile()
 
@@ -462,6 +604,8 @@ async def ask_agent(db, user_id: str, question: str, history: list[dict] | None 
                 "sources": [],
                 "tool_trace": [],
                 "tool_results": [],
+                "selected_category": "none",           # tool category
+                "reroute_count": 0                     # count of re-routes
             }
             
             output = await graph.ainvoke(inputs)
@@ -530,7 +674,10 @@ async def ask_agent(db, user_id: str, question: str, history: list[dict] | None 
 
             # Optionally include tool_trace if needed for internal logging/debugging
             # clean_result["tool_trace"] = output.get("tool_trace", [])
-
+            for trace in output.get("tool_trace", []):
+                print(f"DEBUG: Tool Called -> {trace['tool']}")
+                print(f"DEBUG: Arguments   -> {trace['args']}")
+                print(f"DEBUG: Result (first 200 chars) -> {trace['result_summary'][:200]}...")
             return clean_result
 
         except Exception as e:
