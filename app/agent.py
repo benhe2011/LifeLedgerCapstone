@@ -675,9 +675,10 @@ async def ask_agent(db, user_id: str, question: str, history: list[dict] | None 
             # Optionally include tool_trace if needed for internal logging/debugging
             # clean_result["tool_trace"] = output.get("tool_trace", [])
             for trace in output.get("tool_trace", []):
-                print(f"DEBUG: Tool Called -> {trace['tool']}")
-                print(f"DEBUG: Arguments   -> {trace['args']}")
-                print(f"DEBUG: Result (first 200 chars) -> {trace['result_summary'][:200]}...")
+                logger.debug(f"Tool Called -> {trace['tool']}")
+                logger.debug(f"Arguments   -> {trace['args']}")
+                # Using %s or f-strings both work; f-string shown for consistency
+                logger.debug(f"Result (first 200 chars) -> {trace['result_summary'][:200]}...")
             return clean_result
 
         except Exception as e:
