@@ -393,9 +393,11 @@ async def route_query(state: AgentState):
             }
         }
     }
-
+    # NEW: Get the current active category from state
+    current_cat = state.get("selected_category", "none")
+    
     router_prompt = f"""You are a Tool Router. Analyze the user's request and the ENTIRE conversation history to pick the best category.
-
+    CURRENT ACTIVE CATEGORY: '{current_cat}'
     CATEGORIES:
     - 'spending': Use for totals, aggregate spending, trends, or merchant-level summaries (how much, where, when).
     - 'search': Use for specific items, products, line-item details, or "what" was purchased (what did I buy, item list).
