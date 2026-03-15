@@ -250,7 +250,7 @@ TOOLS = [
 ]
 
 TOOL_BUCKETS = {
-    "spending": ["get_total_spending", "get_spending_by_merchant", "get_receipts_by_date_range", "get_recurring_costs"],
+    "spending": ["get_total_spending", "get_spending_by_merchant", "get_receipts_by_merchant", "get_receipts_by_date_range", "get_recurring_costs"],
     "search": ["search_documents", "get_document_overview", "get_all_document_texts", "get_all_receipt_texts"],
     "travel": ["get_trips"]
 }
@@ -259,11 +259,18 @@ REROUTE_TOOL = {
     "type": "function",
     "function": {
         "name": "request_category_change",
-        "description": "Call this ONLY if the current tool category is wrong or you need tools from a different category.",
+        "description": "Switch to a different tool category when you need tools not available in your current category.",
         "parameters": {
             "type": "object",
-            "properties": {"reason": {"type": "string"}},
-            "required": ["reason"]
+            "properties": {
+                "target_category": {
+                    "type": "string",
+                    "enum": list(TOOL_BUCKETS.keys()),
+                    "description": "The category to switch to"
+                },
+                "reason": {"type": "string", "description": "Why you need this category"}
+            },
+            "required": ["target_category"]
         }
     }
 }
@@ -283,15 +290,21 @@ When answering questions:
    Example: If tool results included documents with doc_id "abc-123" and "def-456" and you referenced both, end your answer with: <!--cited:abc-123,def-456-->
    Only cite documents whose data you directly used. This tag is required even if you only used one document.
 7. CRITICAL: Do NOT invent items. Only list products explicitly found in the provided tool results. If the tool result does not contain a line-item breakdown, state that you can only see the total amount.
-When answering questions:
 8. CRITICAL: You must NEVER answer from memory. Always use the appropriate tool(s) to fetch data first.
+
+You currently have access to {category}-category tools only. If you need tools from a different category ({available_categories}), call request_category_change with the target category.
 
 Today's date is {today}. Use this to interpret relative dates like "last month" or "this year"."""
 
 
 async def build_system_prompt(db, category: str) -> str:
     """Build system prompt with base instructions + mined constraints."""
-    prompt = SYSTEM_PROMPT_BASE.format(today=date.today().isoformat(), category=category)
+    available_categories = ", ".join(TOOL_BUCKETS.keys())
+    prompt = SYSTEM_PROMPT_BASE.format(
+        today=date.today().isoformat(),
+        category=category,
+        available_categories=available_categories,
+    )
     
     constraints = await get_active_constraints(db)
     if not constraints:
@@ -369,6 +382,7 @@ class AgentState(TypedDict):
     tool_results: Annotated[List[Dict[str, Any]], add]
     selected_category: str     # Tracking the active bucket
     reroute_count: int         # Safety to prevent infinite re-routing
+    _rerouting: bool           # Flag set by call_tools when category change requested
     final_result: Dict[str, Any]
 
 async def route_query(state: AgentState):
@@ -470,8 +484,14 @@ async def call_tools(state: AgentState):
         # --- 1. Handle Re-route (Category Change) ---
         if name == "request_category_change":
             is_rerouting = True
-            result_str = json.dumps({"status": "switching_category", "message": "System is reloading tools for a different category."})
-            args = {"reason": "User requested or model identified category mismatch"}
+            try:
+                reroute_args = json.loads(raw_args)
+                target_cat = reroute_args.get("target_category", "search")
+            except:
+                reroute_args = {"target_category": "search"}
+                target_cat = "search"
+            result_str = json.dumps({"status": "switching_category", "target": target_cat, "message": f"Switching to {target_cat} tools."})
+            args = reroute_args
         
         # --- 2. Handle Standard Tools ---
         else:
@@ -513,43 +533,30 @@ async def call_tools(state: AgentState):
             except:
                 pass
 
-    # Update state: Increment reroute_count if we are looping back to the Router
+    # Update state: Increment reroute_count if switching categories
     current_reroutes = state.get("reroute_count", 0)
-    if is_rerouting:
-        current_reroutes += 1
-
-    return {
-        "messages": new_messages, 
-        "sources": new_sources, 
-        "tool_trace": new_traces, 
+    result = {
+        "messages": new_messages,
+        "sources": new_sources,
+        "tool_trace": new_traces,
         "tool_results": new_tool_results,
-        "reroute_count": current_reroutes
+        "reroute_count": current_reroutes,
+        "_rerouting": is_rerouting,
     }
+    if is_rerouting:
+        result["reroute_count"] = current_reroutes + 1
+        result["selected_category"] = target_cat  # skip router LLM call
+    return result
 
 
 def router(state: AgentState):
     """
     Conditional logic to determine the next node in the graph.
-    Returns: 'tools', 're-route', or END.
+    All tool calls (including reroutes) go through 'tools' node.
     """
     last_msg = state["messages"][-1]
-    
-    # Check if the Assistant wants to call any tools
     if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
-        # Check specifically for the Re-route tool call
-        for tc in last_msg.tool_calls:
-            if tc.function.name == "request_category_change":
-                # Check safety break to prevent infinite loops (e.g., max 2 reroutes)
-                if state.get("reroute_count", 0) < REROUTES:
-                    return "re-route"
-                else:
-                    logger.warning("Max reroutes reached for user %s. Forcing END.", state["user_id"])
-                    return END
-        
-        # If any other tool is called, go to the standard tools node
         return "tools"
-    
-    # If no tools were called, the Assistant has provided a final answer (Escape Hatch)
     return END
 
 
@@ -582,11 +589,10 @@ async def ask_agent(db, user_id: str, question: str, history: list[dict] | None 
     workflow.set_entry_point("router")
     workflow.add_edge("router", "agent")
     workflow.add_conditional_edges(
-        "agent", 
+        "agent",
         router,
         {
             "tools": "tools",
-            "re-route": "router",              # MAP THIS to "router"
             END: END
         }
     )
@@ -609,7 +615,8 @@ async def ask_agent(db, user_id: str, question: str, history: list[dict] | None 
                 "tool_trace": [],
                 "tool_results": [],
                 "selected_category": "none",           # tool category
-                "reroute_count": 0                     # count of re-routes
+                "reroute_count": 0,                    # count of re-routes
+                "_rerouting": False                    # reroute flag
             }
             
             output = await graph.ainvoke(inputs)
