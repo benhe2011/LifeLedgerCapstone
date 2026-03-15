@@ -26,6 +26,7 @@ from app.content_safety import (
     check_groundedness,
     check_task_adherence,
 )
+from ddgs import DDGS
 
 logger = logging.getLogger(__name__)
 
@@ -50,13 +51,15 @@ def repair_json(s: str) -> str:
 
 
 def extract_cited_sources(answer: str) -> tuple[str, list[str]]:
-    """Extract cited doc_ids from answer and return (clean_answer, cited_ids)."""
     cited_ids: list[str] = []
     def _collect(m):
+        # This now grabs doc_ids AND URLs separated by commas
         cited_ids.extend(s.strip() for s in m.group(1).split(',') if s.strip())
         return ''
+    # Matches <!--cited:abc-123,https://example.com-->
     clean_answer = re.sub(r'<!--cited:(.*?)-->', _collect, answer).rstrip()
     return clean_answer, cited_ids
+
 
 
 CHARTABLE_TOOLS = {
@@ -246,13 +249,27 @@ TOOLS = [
                 }
             }
         }
+    },
+    {
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": "Search the web for real-time prices, healthy alternatives, and local store information.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The search query (e.g., 'cheaper healthy alternatives to Target brand eggs')"}
+            },
+            "required": ["query"]
+        }
+    }
     }
 ]
 
 TOOL_BUCKETS = {
-    "spending": ["get_total_spending", "get_spending_by_merchant", "get_receipts_by_date_range", "get_recurring_costs"],
-    "search": ["search_documents", "get_document_overview", "get_all_document_texts", "get_all_receipt_texts"],
-    "travel": ["get_trips"]
+    "spending": ["get_total_spending", "get_spending_by_merchant", "get_receipts_by_date_range", "get_recurring_costs", "web_search"],
+    "search": ["search_documents", "get_document_overview", "get_all_document_texts", "get_all_receipt_texts", "web_search"],
+    "travel": ["get_trips", "web_search"]
 }
 
 REROUTE_TOOL = {
@@ -279,12 +296,18 @@ When answering questions:
 3. Include specific numbers, dates, and merchant names when relevant
 4. If asked about spending, always include the total amount
 5. For "when" questions: first check if a date was extracted from the document content. If no date exists, fall back to `created_at` (the upload timestamp) as an approximate date for when the event occurred
-6. CRITICAL — Source citation: You MUST end every answer with a citation tag listing the doc_ids of documents you used. Format: <!--cited:doc_id1,doc_id2,doc_id3-->
-   Example: If tool results included documents with doc_id "abc-123" and "def-456" and you referenced both, end your answer with: <!--cited:abc-123,def-456-->
-   Only cite documents whose data you directly used. This tag is required even if you only used one document.
+6. CRITICAL — Source citation: You MUST end every answer with a citation tag listing all doc_ids OR web URLs you used to generate the response. 
+   Format: <!--cited:source1,source2-->
+   - For internal documents: Use the 'doc_id' provided in the tool results.
+   - For web search: Use the full URL (href) provided in the search results.
+   Example: If you used a Target receipt (doc_id "abc-123") and a health article (URL "https://healthline.com"), end your answer with: <!--cited:abc-123,https://healthline.com-->
+   Only cite sources whose data you directly referenced. This tag is required even if you only used one source.
 7. CRITICAL: Do NOT invent items. Only list products explicitly found in the provided tool results. If the tool result does not contain a line-item breakdown, state that you can only see the total amount.
 When answering questions:
 8. CRITICAL: You must NEVER answer from memory. Always use the appropriate tool(s) to fetch data first.
+9. WEB SOURCES: When using 'web_search' results, provide the answer in your own words, 
+   but ALWAYS include the source title as a clickable Markdown link.
+   Example: 'According to [Healthline](https://healthline.com), lentils are a cheaper protein.'
 
 Today's date is {today}. Use this to interpret relative dates like "last month" or "this year"."""
 
@@ -353,6 +376,16 @@ async def execute_tool(db, user_id: str, tool_call: Any) -> str:
         result = await get_document_overview(db, user_id, args.get("limit", 50))
     elif name == "get_all_document_texts":
         result = await get_all_document_texts(db, user_id, args.get("limit", 30))
+    elif name == "web_search":
+        query = args.get("query")
+        try:
+            with DDGS() as ddgs:
+                # text() returns title, href (url), and body (snippet)
+                results = [r for r in ddgs.text(query, max_results=5)]
+                result = results if results else {"message": "No web results found."}
+        except Exception as e:
+            logger.error(f"DuckDuckGo search failed: {e}")
+            result = {"error": "Web search is currently unavailable."}
     else:
         result = {"error": f"Unknown tool: {name}"}
 
@@ -409,7 +442,10 @@ async def route_query(state: AgentState):
     2. If it did, look at the 'reason' provided and switch the category to the one that contains the missing tools.
     3. If the user asks for "items," "products," or "line details" and you are currently in 'spending', you MUST switch to 'search'.
     4. If the user asks about a "trip" or "vacation" and you are in 'spending' or 'search', you MUST switch to 'travel'.
-    5. Today's Date: {date.today().isoformat()}"""
+    5. Today's Date: {date.today().isoformat()}
+    6. If the user asks for alternatives, current market prices, or health recommendations 
+       not found in their private documents, ensure the 'web_search' tool is available 
+       in the selected category."""
 
     response = await client.chat.completions.create(
         model=DEPLOYMENT,
@@ -496,8 +532,8 @@ async def call_tools(state: AgentState):
             "task_adherence_risk": bool(task_risk)
         })
 
-        # Extract IDs for UI Citations (only for data tools, skip for re-route)
-        if name != "request_category_change":
+        # Extract IDs for UI Citations (only for data tools, skip for re-route and web_search)
+        if name != "request_category_change" and name != 'web_search':
             try:
                 data = json.loads(result_str)
                 if isinstance(data, list):
@@ -509,6 +545,23 @@ async def call_tools(state: AgentState):
                     "tool": name,
                     "args": args,
                     "data": data if isinstance(data, (list, dict)) else None,
+                })
+            except:
+                pass
+        # Extract web URLs for web_search
+        if name == "web_search":
+            try:
+                data = json.loads(result_str)
+                if isinstance(data, list):
+                    for item in data:
+                        # DuckDuckGo uses 'href' for the URL
+                        if "href" in item: 
+                            new_sources.append(item["href"])
+                
+                new_tool_results.append({
+                    "tool": name,
+                    "args": args,
+                    "data": data,
                 })
             except:
                 pass
