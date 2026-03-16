@@ -8,7 +8,7 @@ from PIL import Image
 def compute_phash(image_bytes: bytes) -> str:
     """Compute perceptual hash for an image. Returns hex string."""
     img = Image.open(io.BytesIO(image_bytes))
-    return str(imagehash.phash(img))
+    return str(imagehash.phash(img, hash_size=16))
 
 
 async def check_duplicate(db, user_id: str, phash: str) -> int | None:
