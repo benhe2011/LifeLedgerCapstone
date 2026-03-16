@@ -26,6 +26,7 @@ from app.content_safety import (
     check_groundedness,
     check_task_adherence,
 )
+from ddgs import DDGS
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,8 @@ logger = logging.getLogger(__name__)
 AGENT_TEMPERATURE = float(os.getenv("AGENT_TEMPERATURE", "0.3"))
 AGENT_MAX_RETRIES = int(os.getenv("AGENT_MAX_RETRIES", "0"))
 DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4")
+# Check safety break to prevent infinite loops (e.g., max n reroutes)
+REROUTES = 2
 
 def repair_json(s: str) -> str:
     """Attempt to fix common JSON issues from truncated LLM output."""
@@ -48,13 +51,15 @@ def repair_json(s: str) -> str:
 
 
 def extract_cited_sources(answer: str) -> tuple[str, list[str]]:
-    """Extract cited doc_ids from answer and return (clean_answer, cited_ids)."""
     cited_ids: list[str] = []
     def _collect(m):
+        # This now grabs doc_ids AND URLs separated by commas
         cited_ids.extend(s.strip() for s in m.group(1).split(',') if s.strip())
         return ''
+    # Matches <!--cited:abc-123,https://example.com-->
     clean_answer = re.sub(r'<!--cited:(.*?)-->', _collect, answer).rstrip()
     return clean_answer, cited_ids
+
 
 
 CHARTABLE_TOOLS = {
@@ -244,9 +249,48 @@ TOOLS = [
                 }
             }
         }
+    },
+    {
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": "Search the web for real-time prices, healthy alternatives, and local store information.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The search query (e.g., 'cheaper healthy alternatives to Target brand eggs')"}
+            },
+            "required": ["query"]
+        }
+    }
     }
 ]
 
+TOOL_BUCKETS = {
+    "spending": ["get_total_spending", "get_spending_by_merchant", "get_receipts_by_merchant", "get_receipts_by_date_range", "get_recurring_costs", "web_search"],
+    "search": ["search_documents", "get_document_overview", "get_all_document_texts", "get_all_receipt_texts", "web_search"],
+    "travel": ["get_trips", "web_search"]
+}
+
+REROUTE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "request_category_change",
+        "description": "Switch to a different tool category when you need tools not available in your current category.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target_category": {
+                    "type": "string",
+                    "enum": list(TOOL_BUCKETS.keys()),
+                    "description": "The category to switch to"
+                },
+                "reason": {"type": "string", "description": "Why you need this category"}
+            },
+            "required": ["target_category"]
+        }
+    }
+}
 
 SYSTEM_PROMPT_BASE = """You are a helpful assistant that analyzes the user's screenshots, images, documents and receipts.
 All uploaded content is stored as searchable documents.
@@ -259,16 +303,31 @@ When answering questions:
 3. Include specific numbers, dates, and merchant names when relevant
 4. If asked about spending, always include the total amount
 5. For "when" questions: first check if a date was extracted from the document content. If no date exists, fall back to `created_at` (the upload timestamp) as an approximate date for when the event occurred
-6. CRITICAL — Source citation: You MUST end every answer with a citation tag listing the doc_ids of documents you used. Format: <!--cited:doc_id1,doc_id2,doc_id3-->
-   Example: If tool results included documents with doc_id "abc-123" and "def-456" and you referenced both, end your answer with: <!--cited:abc-123,def-456-->
-   Only cite documents whose data you directly used. This tag is required even if you only used one document.
+6. CRITICAL — Source citation: You MUST end every answer with a citation tag listing all doc_ids OR web URLs you used to generate the response. 
+   Format: <!--cited:source1,source2-->
+   - For internal documents: Use the 'doc_id' provided in the tool results.
+   - For web search: Use the full URL (href) provided in the search results.
+   Example: If you used a Target receipt (doc_id "abc-123") and a health article (URL "https://healthline.com"), end your answer with: <!--cited:abc-123,https://healthline.com-->
+   Only cite sources whose data you directly referenced. This tag is required even if you only used one source.
+7. CRITICAL: Do NOT invent items. Only list products explicitly found in the provided tool results. If the tool result does not contain a line-item breakdown, state that you can only see the total amount.
+8. CRITICAL: You must NEVER answer from memory. Always use the appropriate tool(s) to fetch data first.
+9. WEB SOURCES: When using 'web_search' results, provide the answer in your own words, 
+   but ALWAYS include the source title as a clickable Markdown link.
+   Example: 'According to [Healthline](https://healthline.com), lentils are a cheaper protein.'
+
+You currently have access to {category}-category tools only. If you need tools from a different category ({available_categories}), call request_category_change with the target category.
 
 Today's date is {today}. Use this to interpret relative dates like "last month" or "this year"."""
 
 
-async def build_system_prompt(db) -> str:
+async def build_system_prompt(db, category: str) -> str:
     """Build system prompt with base instructions + mined constraints."""
-    prompt = SYSTEM_PROMPT_BASE.format(today=date.today().isoformat())
+    available_categories = ", ".join(TOOL_BUCKETS.keys())
+    prompt = SYSTEM_PROMPT_BASE.format(
+        today=date.today().isoformat(),
+        category=category,
+        available_categories=available_categories,
+    )
     
     constraints = await get_active_constraints(db)
     if not constraints:
@@ -293,6 +352,7 @@ async def build_system_prompt(db) -> str:
     return prompt
 
 
+
 async def execute_tool(db, user_id: str, tool_call: Any) -> str:
     """Execute a tool call and return JSON result."""
     name = tool_call.function.name
@@ -306,6 +366,8 @@ async def execute_tool(db, user_id: str, tool_call: Any) -> str:
             args = json.loads(repair_json(raw_args))
         except json.JSONDecodeError as e:
             return json.dumps({"error": f"Invalid tool arguments: {e}"})
+    
+    logger.info(f"AGENT_ACTION: Executing {name} with args {args}")
 
     if name == "search_documents":
         result = await search_documents(db, user_id, args["query"], limit=5)
@@ -327,6 +389,16 @@ async def execute_tool(db, user_id: str, tool_call: Any) -> str:
         result = await get_document_overview(db, user_id, args.get("limit", 50))
     elif name == "get_all_document_texts":
         result = await get_all_document_texts(db, user_id, args.get("limit", 30))
+    elif name == "web_search":
+        query = args.get("query")
+        try:
+            with DDGS() as ddgs:
+                # text() returns title, href (url), and body (snippet)
+                results = [r for r in ddgs.text(query, max_results=5)]
+                result = results if results else {"message": "No web results found."}
+        except Exception as e:
+            logger.error(f"DuckDuckGo search failed: {e}")
+            result = {"error": "Web search is currently unavailable."}
     else:
         result = {"error": f"Unknown tool: {name}"}
 
@@ -341,7 +413,70 @@ class AgentState(TypedDict):
     sources: Annotated[List[str], add]
     tool_trace: Annotated[List[Dict[str, Any]], add]
     tool_results: Annotated[List[Dict[str, Any]], add]
+    selected_category: str     # Tracking the active bucket
+    reroute_count: int         # Safety to prevent infinite re-routing
+    _rerouting: bool           # Flag set by call_tools when category change requested
     final_result: Dict[str, Any]
+
+async def route_query(state: AgentState):
+    client = AsyncAzureOpenAI(
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+        api_key=os.getenv("AZURE_OPENAI_KEY"),
+        api_version="2024-02-15-preview"
+    )
+    
+    # Router Tool forces a choice including 'none'
+    router_tool = {
+        "type": "function",
+        "function": {
+            "name": "select_category",
+            "description": "Select the tool category. Use 'none' for greetings or general chat.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "enum": list(TOOL_BUCKETS.keys()) + ["none"]}
+                },
+                "required": ["category"]
+            }
+        }
+    }
+    # NEW: Get the current active category from state
+    current_cat = state.get("selected_category", "none")
+    
+    router_prompt = f"""You are a Tool Router. Analyze the user's request and the ENTIRE conversation history to pick the best category.
+    CURRENT ACTIVE CATEGORY: '{current_cat}'
+    CATEGORIES:
+    - 'spending': Use for totals, aggregate spending, trends, or merchant-level summaries (how much, where, when).
+    - 'search': Use for specific items, products, line-item details, or "what" was purchased (what did I buy, item list).
+    - 'travel': Use for trips, vacations, hotel bookings, or flight clusters.
+    - 'none': Use for greetings, general chat, or questions requiring no data.
+
+    RE-ROUTING LOGIC (CRITICAL):
+    1. Check if the most recent Assistant message called 'request_category_change'. 
+    2. If it did, look at the 'reason' provided and switch the category to the one that contains the missing tools.
+    3. If the user asks for "items," "products," or "line details" and you are currently in 'spending', you MUST switch to 'search'.
+    4. If the user asks about a "trip" or "vacation" and you are in 'spending' or 'search', you MUST switch to 'travel'.
+    5. Today's Date: {date.today().isoformat()}
+    6. If the user asks for alternatives, current market prices, or health recommendations 
+       not found in their private documents, ensure the 'web_search' tool is available 
+       in the selected category."""
+
+    response = await client.chat.completions.create(
+        model=DEPLOYMENT,
+        messages=[{"role": "system", "content": router_prompt}] + state["messages"],
+        tools=[router_tool],
+        tool_choice={"type": "function", "function": {"name": "select_category"}}
+    )
+    
+    raw_args = response.choices[0].message.tool_calls[0].function.arguments
+    try:
+        args = json.loads(raw_args)
+    except json.JSONDecodeError:
+        args = json.loads(repair_json(raw_args))
+    return {
+        "selected_category": args["category"], 
+        "reroute_count": state.get("reroute_count", 0)
+    }
 
 async def call_model(state: AgentState):
     client = AsyncAzureOpenAI(
@@ -349,74 +484,138 @@ async def call_model(state: AgentState):
         api_key=os.getenv("AZURE_OPENAI_KEY"),
         api_version="2024-02-15-preview"
     )
-    sys_prompt = await build_system_prompt(state["db"])
-    msgs = [{"role": "system", "content": sys_prompt}] + state["messages"]
+    cat = state.get("selected_category", "none")
+    # 1. Filter tools by category
+    current_tools = [t for t in TOOLS if t["function"]["name"] in TOOL_BUCKETS.get(cat, [])]
     
+    # 2. Add Re-route tool (unless it's a general chat or we've looped too much)
+    if cat != "none" and state.get("reroute_count", 0) < REROUTES:
+        current_tools.append(REROUTE_TOOL)
+    
+    sys_prompt = await build_system_prompt(state["db"], cat)
     response = await client.chat.completions.create(
         model=DEPLOYMENT,
-        messages=msgs,
-        tools=TOOLS,
-        tool_choice="auto",
-        temperature=AGENT_TEMPERATURE
+        messages=[{"role": "system", "content": sys_prompt}] + state["messages"],
+        tools=current_tools if current_tools else None,
+        tool_choice="auto" if current_tools else None
     )
     return {"messages": [response.choices[0].message]}
 
 async def call_tools(state: AgentState):
+    """Executes tool calls, handles Re-route requests, and updates state."""
     last_msg = state["messages"][-1]
     new_messages = []
     new_sources = []
     new_traces = []
     new_tool_results = []
+    
+    # Track if any tool call in this batch is a Re-route request
+    is_rerouting = False
 
+    # Perform task adherence check (Safety)
     task_risk = await check_task_adherence(TOOLS, state["messages"])
     if task_risk is True:
-        logger.warning(
-            "Task adherence risk for user=%s, tool_calls=%s",
-            state["user_id"],
-            [tc.function.name for tc in last_msg.tool_calls],
-            )
+        logger.warning("Task adherence risk for user=%s", state["user_id"])
 
     for tool_call in last_msg.tool_calls:
-        result_str = await execute_tool(state["db"], state["user_id"], tool_call)
-        new_messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result_str})
+        name = tool_call.function.name
+        raw_args = tool_call.function.arguments
 
-        try:
-            args = json.loads(tool_call.function.arguments)
-        except:
-            args = tool_call.function.arguments
+        # --- 1. Handle Re-route (Category Change) ---
+        if name == "request_category_change":
+            is_rerouting = True
+            try:
+                reroute_args = json.loads(raw_args)
+                target_cat = reroute_args.get("target_category", "search")
+            except:
+                reroute_args = {"target_category": "search"}
+                target_cat = "search"
+            result_str = json.dumps({"status": "switching_category", "target": target_cat, "message": f"Switching to {target_cat} tools."})
+            args = reroute_args
+        
+        # --- 2. Handle Standard Tools ---
+        else:
+            result_str = await execute_tool(state["db"], state["user_id"], tool_call)
+            try:
+                args = json.loads(raw_args)
+            except:
+                args = raw_args
 
+        # Append to tool messages for LLM context
+        new_messages.append({
+            "role": "tool", 
+            "tool_call_id": tool_call.id, 
+            "content": result_str
+        })
+
+        # --- 3. Build Trace & Metadata ---
         new_traces.append({
-            "tool": tool_call.function.name,
+            "tool": name,
             "args": args,
             "result_summary": result_str[:500],
             "task_adherence_risk": bool(task_risk)
         })
 
-        try:
-            data = json.loads(result_str)
-            if isinstance(data, list):
-                for item in data:
-                    if "doc_id" in item: new_sources.append(str(item["doc_id"]))
-                    elif "id" in item: new_sources.append(str(item["id"]))
-        except:
-            data = None
+        # Extract IDs for UI Citations (only for data tools, skip for re-route and web_search)
+        if name != "request_category_change" and name != 'web_search':
+            try:
+                data = json.loads(result_str)
+                if isinstance(data, list):
+                    for item in data:
+                        if "doc_id" in item: new_sources.append(str(item["doc_id"]))
+                        elif "id" in item: new_sources.append(str(item["id"]))
+                
+                new_tool_results.append({
+                    "tool": name,
+                    "args": args,
+                    "data": data if isinstance(data, (list, dict)) else None,
+                })
+            except:
+                pass
+        # Extract web URLs for web_search
+        if name == "web_search":
+            try:
+                data = json.loads(result_str)
+                if isinstance(data, list):
+                    for item in data:
+                        # DuckDuckGo uses 'href' for the URL
+                        if "href" in item: 
+                            new_sources.append(item["href"])
+                
+                new_tool_results.append({
+                    "tool": name,
+                    "args": args,
+                    "data": data,
+                })
+            except:
+                pass
+    # Update state: Increment reroute_count if switching categories
+    current_reroutes = state.get("reroute_count", 0)
+    result = {
+        "messages": new_messages,
+        "sources": new_sources,
+        "tool_trace": new_traces,
+        "tool_results": new_tool_results,
+        "reroute_count": current_reroutes,
+        "_rerouting": is_rerouting,
+    }
+    if is_rerouting:
+        result["reroute_count"] = current_reroutes + 1
+        result["selected_category"] = target_cat  # skip router LLM call
+    return result
 
-        new_tool_results.append({
-            "tool": tool_call.function.name,
-            "args": args,
-            "data": data if isinstance(data, (list, dict)) else None,
-        })
-
-    return {"messages": new_messages, "sources": new_sources, "tool_trace": new_traces, "tool_results": new_tool_results}
 
 def router(state: AgentState):
+    """
+    Conditional logic to determine the next node in the graph.
+    All tool calls (including reroutes) go through 'tools' node.
+    """
     last_msg = state["messages"][-1]
-    # If the LLM generated tool calls, go to tools
     if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
         return "tools"
-    # If it's a Tool message or an Assistant message with content, the loop continues 
-    # until the Assistant provides a final text response without tool calls.
     return END
+
+
 
 # --- Main Interface ---
 
@@ -440,10 +639,19 @@ async def ask_agent(db, user_id: str, question: str, history: list[dict] | None 
 
     # 2. Build the LangGraph Workflow
     workflow = StateGraph(AgentState)
+    workflow.add_node("router", route_query)
     workflow.add_node("agent", call_model)
     workflow.add_node("tools", call_tools)
-    workflow.set_entry_point("agent")
-    workflow.add_conditional_edges("agent", router)
+    workflow.set_entry_point("router")
+    workflow.add_edge("router", "agent")
+    workflow.add_conditional_edges(
+        "agent",
+        router,
+        {
+            "tools": "tools",
+            END: END
+        }
+    )
     workflow.add_edge("tools", "agent")
     graph = workflow.compile()
 
@@ -462,6 +670,9 @@ async def ask_agent(db, user_id: str, question: str, history: list[dict] | None 
                 "sources": [],
                 "tool_trace": [],
                 "tool_results": [],
+                "selected_category": "none",           # tool category
+                "reroute_count": 0,                    # count of re-routes
+                "_rerouting": False                    # reroute flag
             }
             
             output = await graph.ainvoke(inputs)
@@ -530,7 +741,11 @@ async def ask_agent(db, user_id: str, question: str, history: list[dict] | None 
 
             # Optionally include tool_trace if needed for internal logging/debugging
             # clean_result["tool_trace"] = output.get("tool_trace", [])
-
+            for trace in output.get("tool_trace", []):
+                logger.debug(f"Tool Called -> {trace['tool']}")
+                logger.debug(f"Arguments   -> {trace['args']}")
+                # Using %s or f-strings both work; f-string shown for consistency
+                logger.debug(f"Result (first 200 chars) -> {trace['result_summary'][:200]}...")
             return clean_result
 
         except Exception as e:

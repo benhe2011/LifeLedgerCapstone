@@ -26,6 +26,7 @@ requests==2.31.0
 
 # Agent
 langgraph==0.0.26
+ddgs==9.11.3
 
 # Embeddings
 sentence-transformers==2.3.1
