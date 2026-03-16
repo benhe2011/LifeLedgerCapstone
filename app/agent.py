@@ -468,7 +468,11 @@ async def route_query(state: AgentState):
         tool_choice={"type": "function", "function": {"name": "select_category"}}
     )
     
-    args = json.loads(response.choices[0].message.tool_calls[0].function.arguments)
+    raw_args = response.choices[0].message.tool_calls[0].function.arguments
+    try:
+        args = json.loads(raw_args)
+    except json.JSONDecodeError:
+        args = json.loads(repair_json(raw_args))
     return {
         "selected_category": args["category"], 
         "reroute_count": state.get("reroute_count", 0)
@@ -485,7 +489,7 @@ async def call_model(state: AgentState):
     current_tools = [t for t in TOOLS if t["function"]["name"] in TOOL_BUCKETS.get(cat, [])]
     
     # 2. Add Re-route tool (unless it's a general chat or we've looped too much)
-    if cat != "none" and state.get("reroute_count", 0) < 2:
+    if cat != "none" and state.get("reroute_count", 0) < REROUTES:
         current_tools.append(REROUTE_TOOL)
     
     sys_prompt = await build_system_prompt(state["db"], cat)
