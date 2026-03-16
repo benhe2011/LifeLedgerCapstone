@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import re
-from typing import Dict, Any, List, Annotated, TypedDict, Union
+from typing import Dict, Any, List, Annotated, TypedDict
 from datetime import date
 from operator import add
 from openai import AsyncAzureOpenAI

@@ -78,6 +78,20 @@ async def create_tables():
             ALTER TABLE documents ADD COLUMN IF NOT EXISTS phash TEXT
         """)
 
+        # Add radar crawler columns (safe if already exists)
+        await conn.execute("""
+            ALTER TABLE documents ADD COLUMN IF NOT EXISTS radar_processed BOOLEAN DEFAULT FALSE
+        """)
+        await conn.execute("""
+            ALTER TABLE documents ADD COLUMN IF NOT EXISTS event_date DATE
+        """)
+        await conn.execute("""
+            ALTER TABLE documents ADD COLUMN IF NOT EXISTS event_description TEXT
+        """)
+        await conn.execute("""
+            ALTER TABLE documents ADD COLUMN IF NOT EXISTS event_entity TEXT
+        """)
+
         # Create index on user_id
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_documents_user_id ON documents(user_id)
