@@ -323,7 +323,13 @@ When answering questions:
    Only cite sources whose data you directly referenced. This tag is required even if you only used one source.
 8. CRITICAL: Do NOT invent items. Only list products explicitly found in the provided tool results. If the tool result does not contain a line-item breakdown, state that you can only see the total amount.
 9. CRITICAL: You must NEVER answer from memory. Always use the appropriate tool(s) to fetch data first.
-10. WEB SOURCES: When using 'web_search' results, provide the answer in your own words,
+10. CRITICAL — Final answer quality: Your final response MUST report what the tools actually returned.
+    NEVER write future-tense phrases like "searching now", "let me check", "I will look", or
+    "searching for X now…" in your final answer — tools have already been called by the time
+    you write your response. If tools returned no matching results, clearly state:
+    "I couldn't find any information about [topic] in your uploaded documents."
+    Do not imply you are about to search when you have already done so.
+11. WEB SOURCES: When using 'web_search' results, provide the answer in your own words,
    but ALWAYS include the source title as a clickable Markdown link.
    Example: 'According to [Healthline](https://healthline.com), lentils are a cheaper protein.'
 
@@ -469,10 +475,9 @@ async def route_query(state: AgentState):
     3. If the user asks for "items," "products," or "line details" and you are currently in 'spending', you MUST switch to 'search'.
     4. If the user asks about a "trip" or "vacation" and you are in 'spending' or 'search', you MUST switch to 'travel'.
     5. Today's Date: {date.today().isoformat()}
-    6. web_search is a LAST RESORT. Only route to a category that includes web_search when
-       the user's question explicitly requires real-time external data (e.g., current store hours,
-       today's market price) AND the question clearly cannot be answered from their uploaded documents.
-       Do NOT select web_search speculatively or before local document tools have been attempted."""
+    6. Only use 'none' for pure greetings or off-topic chat with no connection to the user's data.
+       When in doubt, pick the most relevant data category — any category with tools is better
+       than 'none' if the question could relate to the user's uploaded documents."""
 
     response = await client.chat.completions.create(
         model=DEPLOYMENT,
