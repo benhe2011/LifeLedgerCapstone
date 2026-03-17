@@ -254,7 +254,14 @@ TOOLS = [
     "type": "function",
     "function": {
         "name": "web_search",
-        "description": "Search the web for real-time prices, healthy alternatives, and local store information.",
+        "description": (
+            "LAST RESORT ONLY: Search the web for real-time prices, alternatives, or general information. "
+            "You MUST first attempt to answer the question using the other available document tools. "
+            "Only call this tool if those tools returned no relevant results OR the question explicitly "
+            "requires current external data that cannot exist in the user's uploaded documents "
+            "(e.g., today's market price, a store's current hours). "
+            "Do NOT call this tool speculatively or as a first step."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -298,20 +305,32 @@ Your primary goal is to extract information from these files and answer any ques
 You have tools to search documents, query spending data, and retrieve receipt details.
 
 When answering questions:
-1. Use the appropriate tool(s) to get data
-2. Analyze the results and provide a clear, helpful answer
-3. Include specific numbers, dates, and merchant names when relevant
-4. If asked about spending, always include the total amount
-5. For "when" questions: first check if a date was extracted from the document content. If no date exists, fall back to `created_at` (the upload timestamp) as an approximate date for when the event occurred
-6. CRITICAL — Source citation: You MUST end every answer with a citation tag listing all doc_ids OR web URLs you used to generate the response. 
+1. TOOL PRIORITY — Always follow this order:
+   a. First, use the available local document tools to look up information from the user's own records.
+   b. Only call web_search if the local document tools returned no useful results AND the question
+      genuinely requires real-time external data that cannot exist in the user's uploaded files.
+   c. NEVER call web_search as a first step or before attempting local document tools.
+2. Use multiple tools if needed — if your first retrieval returns no results or partial results,
+   try a broader tool before concluding. Do not give up after a single failed attempt.
+3. Analyze the results and provide a clear, helpful answer
+4. Include specific numbers, dates, and merchant names when relevant
+5. If asked about spending, always include the total amount
+6. For "when" questions: first check if a date was extracted from the document content. If no date exists, fall back to `created_at` (the upload timestamp) as an approximate date for when the event occurred
+7. CRITICAL — Source citation: You MUST end every answer with a citation tag listing all doc_ids OR web URLs you used to generate the response.
    Format: <!--cited:source1,source2-->
    - For internal documents: Use the 'doc_id' provided in the tool results.
    - For web search: Use the full URL (href) provided in the search results.
    Example: If you used a Target receipt (doc_id "abc-123") and a health article (URL "https://healthline.com"), end your answer with: <!--cited:abc-123,https://healthline.com-->
    Only cite sources whose data you directly referenced. This tag is required even if you only used one source.
-7. CRITICAL: Do NOT invent items. Only list products explicitly found in the provided tool results. If the tool result does not contain a line-item breakdown, state that you can only see the total amount.
-8. CRITICAL: You must NEVER answer from memory. Always use the appropriate tool(s) to fetch data first.
-9. WEB SOURCES: When using 'web_search' results, provide the answer in your own words, 
+8. CRITICAL: Do NOT invent items. Only list products explicitly found in the provided tool results. If the tool result does not contain a line-item breakdown, state that you can only see the total amount.
+9. CRITICAL: You must NEVER answer from memory. Always use the appropriate tool(s) to fetch data first.
+10. CRITICAL — Final answer quality: Your final response MUST report what the tools actually returned.
+    NEVER write future-tense phrases like "searching now", "let me check", "I will look", or
+    "searching for X now…" in your final answer — tools have already been called by the time
+    you write your response. Only state "I couldn't find any information about [topic]" after
+    making a genuine multi-tool effort (trying at least 2 tools). Do not give up after a single
+    empty result — try a broader retrieval approach first.
+11. WEB SOURCES: When using 'web_search' results, provide the answer in your own words,
    but ALWAYS include the source title as a clickable Markdown link.
    Example: 'According to [Healthline](https://healthline.com), lentils are a cheaper protein.'
 
@@ -457,9 +476,9 @@ async def route_query(state: AgentState):
     3. If the user asks for "items," "products," or "line details" and you are currently in 'spending', you MUST switch to 'search'.
     4. If the user asks about a "trip" or "vacation" and you are in 'spending' or 'search', you MUST switch to 'travel'.
     5. Today's Date: {date.today().isoformat()}
-    6. If the user asks for alternatives, current market prices, or health recommendations 
-       not found in their private documents, ensure the 'web_search' tool is available 
-       in the selected category."""
+    6. Only use 'none' for pure greetings or off-topic chat with no connection to the user's data.
+       When in doubt, pick the most relevant data category — any category with tools is better
+       than 'none' if the question could relate to the user's uploaded documents."""
 
     response = await client.chat.completions.create(
         model=DEPLOYMENT,
