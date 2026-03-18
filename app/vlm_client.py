@@ -113,6 +113,145 @@ Example: {"merchant": "Target", "date": "2024-01-15", "total_amount": 45.99, "ad
         return None
 
 
+EXTRACTION_PROMPTS = {
+    "receipt": """You are a receipt parsing assistant. Extract the following fields from the receipt image:
+- merchant: Store/business name
+- date: Transaction date (YYYY-MM-DD format)
+- total_amount: Total amount paid (numeric, no currency symbol)
+- address: Store address if visible
+
+Respond in JSON format only. If a field is not found, use null.
+Example: {"merchant": "Target", "date": "2024-01-15", "total_amount": 45.99, "address": "123 Main St"}""",
+
+    "subscription": """You are a document parsing assistant. Extract the following fields from this subscription document:
+- merchant: Service or company name
+- date: Billing or document date (YYYY-MM-DD format)
+- total_amount: Amount charged (numeric, no currency symbol)
+- address: Company address if visible
+
+Respond in JSON format only. If a field is not found, use null.
+Example: {"merchant": "Netflix", "date": "2024-03-01", "total_amount": 15.99, "address": null}""",
+
+    "invoice": """You are a document parsing assistant. Extract the following fields from this invoice:
+- merchant: Vendor or company name
+- date: Invoice date (YYYY-MM-DD format)
+- total_amount: Total amount due (numeric, no currency symbol)
+- address: Vendor address if visible
+
+Respond in JSON format only. If a field is not found, use null.
+Example: {"merchant": "Acme Corp", "date": "2024-02-20", "total_amount": 1250.00, "address": "456 Commerce Blvd"}""",
+}
+
+EXTRACTION_TEXT_PROMPTS = {
+    "receipt": """Extract receipt information from this text.
+
+Respond in JSON:
+{
+  "merchant": "Store/business name or null",
+  "total_amount": numeric amount or null,
+  "date": "YYYY-MM-DD or null"
+}
+
+Only extract what's clearly present. Use null for missing fields.""",
+
+    "subscription": """Extract subscription information from this text.
+
+Respond in JSON:
+{
+  "merchant": "Service/company name or null",
+  "total_amount": numeric amount or null,
+  "date": "YYYY-MM-DD or null"
+}
+
+Only extract what's clearly present. Use null for missing fields.""",
+
+    "invoice": """Extract invoice information from this text.
+
+Respond in JSON:
+{
+  "merchant": "Vendor/company name or null",
+  "total_amount": numeric amount due or null,
+  "date": "YYYY-MM-DD or null"
+}
+
+Only extract what's clearly present. Use null for missing fields.""",
+}
+
+
+async def extract_document_fields(image_bytes: bytes, doc_type: str) -> Dict[str, Any] | None:
+    """Extract structured fields from a document image based on its type."""
+    prompt = EXTRACTION_PROMPTS.get(doc_type)
+    if not prompt:
+        return None
+
+    client = get_vlm_client()
+    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1")
+
+    base64_image = encode_image(image_bytes)
+
+    response = await client.chat.completions.create(
+        model=deployment,
+        messages=[
+            {"role": "system", "content": prompt},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"Extract the fields from this {doc_type} image:"
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{base64_image}",
+                            "detail": "high"
+                        }
+                    }
+                ]
+            }
+        ],
+        max_tokens=500,
+        temperature=0.1,
+        response_format={"type": "json_object"},
+    )
+
+    import json
+    try:
+        return json.loads(response.choices[0].message.content)
+    except json.JSONDecodeError:
+        return None
+
+
+async def extract_document_from_text(text: str, doc_type: str) -> Dict[str, Any] | None:
+    """Extract fields from user-provided text based on document type.
+
+    Used when user manually inputs text for a document that OCR couldn't read.
+    """
+    prompt = EXTRACTION_TEXT_PROMPTS.get(doc_type)
+    if not prompt:
+        return None
+
+    client = get_vlm_client()
+    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1")
+
+    response = await client.chat.completions.create(
+        model=deployment,
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": text}
+        ],
+        max_tokens=200,
+        temperature=0,
+        response_format={"type": "json_object"},
+    )
+
+    import json
+    try:
+        return json.loads(response.choices[0].message.content)
+    except json.JSONDecodeError:
+        return None
+
+
 async def extract_event_from_text(doc_text: str, doc_date=None) -> Dict[str, Any] | None:
     """Extract event date from document text using text-only LLM (cheap/fast).
 

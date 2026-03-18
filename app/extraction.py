@@ -98,8 +98,8 @@ async def get_user_receipts(db, user_id: str, limit: int = 100) -> list:
     ]
 
 
-async def get_total_spending(db, user_id: str, start_date: str = None, end_date: str = None) -> dict:
-    """Get total spending in date range."""
+async def get_total_spending(db, user_id: str, start_date: str = None, end_date: str = None, doc_type: str = None) -> dict:
+    """Get total spending in date range, optionally filtered by document type."""
     sql = """
         SELECT COALESCE(SUM(e.total_amount), 0) as total, COUNT(*) as count
         FROM extractions e
@@ -107,13 +107,14 @@ async def get_total_spending(db, user_id: str, start_date: str = None, end_date:
         WHERE d.user_id = $1
           AND ($2::date IS NULL OR COALESCE(e.date, d.created_at::date) >= $2::date)
           AND ($3::date IS NULL OR COALESCE(e.date, d.created_at::date) <= $3::date)
+          AND ($4::text IS NULL OR e.doc_type = $4::text)
     """
-    row = await db.fetchrow(sql, user_id, parse_date(start_date), parse_date(end_date))
+    row = await db.fetchrow(sql, user_id, parse_date(start_date), parse_date(end_date), doc_type)
     return {"total": float(row["total"]), "receipt_count": row["count"]}
 
 
-async def get_spending_by_merchant(db, user_id: str, start_date: str = None, end_date: str = None, limit: int = 10) -> list:
-    """Get spending grouped by merchant."""
+async def get_spending_by_merchant(db, user_id: str, start_date: str = None, end_date: str = None, limit: int = 10, doc_type: str = None) -> list:
+    """Get spending grouped by merchant, optionally filtered by document type."""
     sql = """
         SELECT e.merchant, COALESCE(SUM(e.total_amount), 0) as total, COUNT(*) as count,
                array_agg(DISTINCT d.id) as doc_ids
@@ -122,26 +123,28 @@ async def get_spending_by_merchant(db, user_id: str, start_date: str = None, end
         WHERE d.user_id = $1 AND e.merchant IS NOT NULL
           AND ($2::date IS NULL OR COALESCE(e.date, d.created_at::date) >= $2::date)
           AND ($3::date IS NULL OR COALESCE(e.date, d.created_at::date) <= $3::date)
+          AND ($5::text IS NULL OR e.doc_type = $5::text)
         GROUP BY e.merchant
         ORDER BY total DESC
         LIMIT $4
     """
-    rows = await db.fetch(sql, user_id, parse_date(start_date), parse_date(end_date), limit)
+    rows = await db.fetch(sql, user_id, parse_date(start_date), parse_date(end_date), limit, doc_type)
     return [{"merchant": r["merchant"], "total": float(r["total"]), "count": r["count"],
              "doc_ids": [str(did) for did in r["doc_ids"]]} for r in rows]
 
 
-async def get_receipts_by_merchant(db, user_id: str, merchant: str, limit: int = 20) -> list:
-    """Get receipts from a specific merchant."""
+async def get_receipts_by_merchant(db, user_id: str, merchant: str, limit: int = 20, doc_type: str = None) -> list:
+    """Get documents from a specific merchant, optionally filtered by document type."""
     sql = """
         SELECT e.id, e.merchant, e.date, e.total_amount, d.id as doc_id
         FROM extractions e
         JOIN documents d ON e.doc_id = d.id
         WHERE d.user_id = $1 AND e.merchant ILIKE $2
+          AND ($4::text IS NULL OR e.doc_type = $4::text)
         ORDER BY e.date DESC
         LIMIT $3
     """
-    rows = await db.fetch(sql, user_id, f"%{merchant}%", limit)
+    rows = await db.fetch(sql, user_id, f"%{merchant}%", limit, doc_type)
     return [
         {
             "id": r["id"],
@@ -154,17 +157,18 @@ async def get_receipts_by_merchant(db, user_id: str, merchant: str, limit: int =
     ]
 
 
-async def get_receipts_by_date_range(db, user_id: str, start_date: str, end_date: str, limit: int = 50) -> list:
-    """Get receipts in a date range."""
+async def get_receipts_by_date_range(db, user_id: str, start_date: str, end_date: str, limit: int = 50, doc_type: str = None) -> list:
+    """Get documents in a date range, optionally filtered by document type."""
     sql = """
         SELECT e.id, e.merchant, e.date, e.total_amount, d.id as doc_id
         FROM extractions e
         JOIN documents d ON e.doc_id = d.id
         WHERE d.user_id = $1 AND e.date BETWEEN $2::date AND $3::date
+          AND ($5::text IS NULL OR e.doc_type = $5::text)
         ORDER BY e.date DESC
         LIMIT $4
     """
-    rows = await db.fetch(sql, user_id, parse_date(start_date), parse_date(end_date), limit)
+    rows = await db.fetch(sql, user_id, parse_date(start_date), parse_date(end_date), limit, doc_type)
     return [
         {
             "id": r["id"],
@@ -177,18 +181,19 @@ async def get_receipts_by_date_range(db, user_id: str, start_date: str, end_date
     ]
 
 
-async def get_all_receipt_texts(db, user_id: str, limit: int = 50) -> list:
-    """Get all receipt documents with their full OCR text for broad reasoning queries."""
+async def get_all_receipt_texts(db, user_id: str, limit: int = 50, doc_type: str = None) -> list:
+    """Get all extracted documents with their full OCR text for broad reasoning queries."""
     sql = """
         SELECT e.merchant, e.date, e.total_amount, d.id as doc_id, d.doc_text
         FROM extractions e
         JOIN documents d ON e.doc_id = d.id
         WHERE d.user_id = $1
           AND d.doc_text NOT IN ('[No text detected]', '[Processing failed]')
+          AND ($3::text IS NULL OR e.doc_type = $3::text)
         ORDER BY e.date DESC NULLS LAST
         LIMIT $2
     """
-    rows = await db.fetch(sql, user_id, limit)
+    rows = await db.fetch(sql, user_id, limit, doc_type)
     return [
         {
             "merchant": r["merchant"],
