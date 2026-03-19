@@ -13,7 +13,7 @@ from PIL import Image, ImageOps
 from paddleocr import PaddleOCR
 
 from app.s3 import download_from_s3
-from app.vlm_client import refine_ocr_with_vlm, extract_receipt_fields
+from app.vlm_client import refine_ocr_with_vlm, extract_document_fields
 
 
 logger = logging.getLogger(__name__)
@@ -65,13 +65,17 @@ def classify_doc_type(ocr_text: str) -> str:
     """Classify document type based on OCR text using heuristics."""
     text_lower = ocr_text.lower()
 
+    # Invoice indicators (check before receipt - invoices often contain "total" too)
+    if any(kw in text_lower for kw in ["invoice", "bill to", "remit to", "amount due", "purchase order"]):
+        return "invoice"
+
+    # Subscription indicators (check before receipt - subscriptions often contain "total" too)
+    if any(kw in text_lower for kw in ["renew", "subscription", "billing", "monthly", "annual"]):
+        return "subscription"
+
     # Receipt indicators
     if any(kw in text_lower for kw in ["total", "subtotal", "tax", "cash", "visa", "mastercard", "payment"]):
         return "receipt"
-
-    # Subscription indicators
-    if any(kw in text_lower for kw in ["renew", "subscription", "billing", "monthly", "annual"]):
-        return "subscription"
 
     # Warranty indicators
     if any(kw in text_lower for kw in ["warranty", "serial number", "guarantee", "coverage"]):
@@ -148,13 +152,13 @@ async def run_ocr_pipeline(image_bytes: bytes) -> Dict[str, Any]:
     # Classify document type
     doc_type = classify_doc_type(doc_text)
 
-    # Extract structured fields for receipts
+    # Extract structured fields for classified documents
     extraction = None
-    if doc_type == "receipt":
+    if doc_type in ("receipt", "subscription", "invoice"):
         try:
-            extraction = await extract_receipt_fields(image_bytes)
+            extraction = await extract_document_fields(image_bytes, doc_type)
         except Exception as e:
-            logger.warning(f"Receipt extraction failed: {e}")
+            logger.warning(f"{doc_type} extraction failed: {e}")
 
     return {
         "doc_text": doc_text,

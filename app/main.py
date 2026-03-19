@@ -696,14 +696,14 @@ async def review_document(
         ocr_blocks=doc.get("ocr_blocks", []),
     )
 
-    # If it looks like a receipt, extract fields from text (no image needed)
-    if new_doc_type == "receipt" and request.note.strip():
-        from app.vlm_client import extract_receipt_from_text
+    # Extract fields from text for supported document types (no image needed)
+    if new_doc_type in ("receipt", "subscription", "invoice") and request.note.strip():
+        from app.vlm_client import extract_document_from_text
         from app.extraction import save_extraction
         try:
-            extraction = await extract_receipt_from_text(request.note)
+            extraction = await extract_document_from_text(request.note, new_doc_type)
             if extraction:
-                await save_extraction(db, int(doc_id), "receipt", extraction)
+                await save_extraction(db, int(doc_id), new_doc_type, extraction)
         except Exception as e:
             logger.warning(f"Text extraction failed for doc {doc_id}: {e}")
 

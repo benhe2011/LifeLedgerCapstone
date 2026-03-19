@@ -138,7 +138,8 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "start_date": {"type": "string", "description": "Optional start date YYYY-MM-DD. Omit for all time."},
-                    "end_date": {"type": "string", "description": "Optional end date YYYY-MM-DD. Omit for all time."}
+                    "end_date": {"type": "string", "description": "Optional end date YYYY-MM-DD. Omit for all time."},
+                    "doc_type": {"type": "string", "enum": ["receipt", "subscription", "invoice"], "description": "Optional filter by document type. Omit to include all types."}
                 }
             }
         }
@@ -153,7 +154,8 @@ TOOLS = [
                 "properties": {
                     "start_date": {"type": "string", "description": "Optional start date YYYY-MM-DD. Omit for all time."},
                     "end_date": {"type": "string", "description": "Optional end date YYYY-MM-DD. Omit for all time."},
-                    "limit": {"type": "integer", "description": "Max merchants to return", "default": 10}
+                    "limit": {"type": "integer", "description": "Max merchants to return", "default": 10},
+                    "doc_type": {"type": "string", "enum": ["receipt", "subscription", "invoice"], "description": "Optional filter by document type. Omit to include all types."}
                 }
             }
         }
@@ -162,12 +164,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_receipts_by_merchant",
-            "description": "Get all receipts from a specific merchant. Use for 'show me Target receipts' type questions.",
+            "description": "Get all documents from a specific merchant or service. Use for 'show me Target receipts' or 'show me Netflix charges' type questions.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "merchant": {"type": "string", "description": "Merchant name (partial match)"},
-                    "limit": {"type": "integer", "description": "Max receipts to return", "default": 20}
+                    "merchant": {"type": "string", "description": "Merchant or service name (partial match)"},
+                    "limit": {"type": "integer", "description": "Max documents to return", "default": 20},
+                    "doc_type": {"type": "string", "enum": ["receipt", "subscription", "invoice"], "description": "Optional filter by document type. Omit to include all types."}
                 },
                 "required": ["merchant"]
             }
@@ -177,13 +180,14 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_receipts_by_date_range",
-            "description": "Get all receipts in a date range with dates and amounts. Use for spending trends, timelines, 'show my spending over time', or 'receipts from last month' type questions.",
+            "description": "Get all documents in a date range with dates and amounts. Use for spending trends, timelines, 'show my spending over time', or 'documents from last month' type questions.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "start_date": {"type": "string", "description": "Start date YYYY-MM-DD"},
                     "end_date": {"type": "string", "description": "End date YYYY-MM-DD"},
-                    "limit": {"type": "integer", "description": "Max receipts to return", "default": 50}
+                    "limit": {"type": "integer", "description": "Max documents to return", "default": 50},
+                    "doc_type": {"type": "string", "enum": ["receipt", "subscription", "invoice"], "description": "Optional filter by document type. Omit to include all types."}
                 },
                 "required": ["start_date", "end_date"]
             }
@@ -215,11 +219,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_all_receipt_texts",
-            "description": "Get all receipt documents with their full item-level text. Use for broad questions that need reasoning across ALL purchases (e.g., 'what unhealthy items did I buy', 'show me all electronics purchases', 'what did I buy most frequently'). Returns merchant, date, total, and full OCR text containing line items.",
+            "description": "Get all extracted documents with their full item-level text. Use for broad questions that need reasoning across ALL purchases or documents (e.g., 'what unhealthy items did I buy', 'show me all electronics purchases', 'what subscriptions do I have'). Returns merchant, date, total, and full OCR text.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "limit": {"type": "integer", "description": "Max receipts to return", "default": 50}
+                    "limit": {"type": "integer", "description": "Max documents to return", "default": 50},
+                    "doc_type": {"type": "string", "enum": ["receipt", "subscription", "invoice"], "description": "Optional filter by document type. Omit to include all types."}
                 }
             }
         }
@@ -302,7 +307,8 @@ REROUTE_TOOL = {
 SYSTEM_PROMPT_BASE = """You are a helpful assistant that analyzes the user's screenshots, images, documents and receipts.
 All uploaded content is stored as searchable documents.
 Your primary goal is to extract information from these files and answer any questions the user has about that information.
-You have tools to search documents, query spending data, and retrieve receipt details.
+You have tools to search documents, query spending data, and retrieve document details.
+Documents are classified as receipts, subscriptions, or invoices. Many tools accept an optional doc_type filter ("receipt", "subscription", "invoice"). Use it when the user asks about a specific type (e.g., "show me my subscriptions" → doc_type="subscription"). Omit it when the user asks broadly (e.g., "total spending").
 
 When answering questions:
 1. TOOL PRIORITY — Always follow this order:
@@ -396,19 +402,19 @@ async def execute_tool(db, user_id: str, tool_call: Any) -> str:
     if name == "search_documents":
         result = await search_documents(db, user_id, args["query"], limit=5)
     elif name == "get_total_spending":
-        result = await get_total_spending(db, user_id, args.get("start_date"), args.get("end_date"))
+        result = await get_total_spending(db, user_id, args.get("start_date"), args.get("end_date"), doc_type=args.get("doc_type"))
     elif name == "get_spending_by_merchant":
-        result = await get_spending_by_merchant(db, user_id, args.get("start_date"), args.get("end_date"), args.get("limit", 10))
+        result = await get_spending_by_merchant(db, user_id, args.get("start_date"), args.get("end_date"), args.get("limit", 10), doc_type=args.get("doc_type"))
     elif name == "get_receipts_by_merchant":
-        result = await get_receipts_by_merchant(db, user_id, args["merchant"], args.get("limit", 20))
+        result = await get_receipts_by_merchant(db, user_id, args["merchant"], args.get("limit", 20), doc_type=args.get("doc_type"))
     elif name == "get_receipts_by_date_range":
-        result = await get_receipts_by_date_range(db, user_id, args["start_date"], args["end_date"], args.get("limit", 50))
+        result = await get_receipts_by_date_range(db, user_id, args["start_date"], args["end_date"], args.get("limit", 50), doc_type=args.get("doc_type"))
     elif name == "get_recurring_costs":
         result = await detect_recurring_costs(db, user_id)
     elif name == "get_trips":
         result = await detect_trips(db, user_id)
     elif name == "get_all_receipt_texts":
-        result = await get_all_receipt_texts(db, user_id, args.get("limit", 50))
+        result = await get_all_receipt_texts(db, user_id, args.get("limit", 50), doc_type=args.get("doc_type"))
     elif name == "get_document_overview":
         result = await get_document_overview(db, user_id, args.get("limit", 50))
     elif name == "get_all_document_texts":
