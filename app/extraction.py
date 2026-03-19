@@ -259,38 +259,60 @@ async def get_all_document_texts(db, user_id: str, limit: int = 30) -> list:
 
 
 async def detect_recurring_costs(db, user_id: str) -> List[dict]:
-    """Detect recurring charges by analyzing purchase intervals per merchant."""
+    """Detect recurring charges by analyzing purchase intervals per merchant
+    and including documents explicitly classified as subscriptions."""
     sql = """
-        SELECT e.merchant, e.date, e.total_amount
+        SELECT e.merchant, e.date, e.total_amount, e.doc_type
         FROM extractions e
         JOIN documents d ON e.doc_id = d.id
-        WHERE d.user_id = $1 AND e.merchant IS NOT NULL AND e.date IS NOT NULL
+        WHERE d.user_id = $1 AND e.merchant IS NOT NULL
         ORDER BY e.merchant, e.date
     """
     rows = await db.fetch(sql, user_id)
 
-    # Group by merchant
+    # Group by merchant, tracking doc_type
     by_merchant: Dict[str, list] = defaultdict(list)
+    merchant_has_subscription: Dict[str, bool] = defaultdict(bool)
     for r in rows:
         by_merchant[r["merchant"]].append({
             "date": r["date"],
             "amount": float(r["total_amount"]) if r["total_amount"] else 0,
         })
+        if r["doc_type"] == "subscription":
+            merchant_has_subscription[r["merchant"]] = True
 
     results = []
     for merchant, transactions in by_merchant.items():
-        if len(transactions) < 3:
+        amounts = [t["amount"] for t in transactions if t["amount"]]
+        avg_amount = sum(amounts) / len(amounts) if amounts else 0
+        dates_with_values = [t["date"] for t in transactions if t["date"]]
+
+        # Documents classified as subscriptions are inherently recurring
+        if merchant_has_subscription[merchant]:
+            last_date = max(dates_with_values) if dates_with_values else None
+            results.append({
+                "merchant": merchant,
+                "is_recurring": True,
+                "interval_days": 30,
+                "monthly_estimate": round(avg_amount, 2),
+                "annual_estimate": round(avg_amount * 12, 2),
+                "next_renewal_date": (last_date + timedelta(days=30)).isoformat() if last_date else None,
+                "last_date": last_date.isoformat() if last_date else None,
+                "transaction_count": len(transactions),
+            })
             continue
 
-        dates = [t["date"] for t in transactions]
-        amounts = [t["amount"] for t in transactions if t["amount"]]
+        # For non-subscription merchants, detect recurring patterns from intervals
+        if len(transactions) < 3 or not dates_with_values or len(dates_with_values) < 2:
+            continue
+
+        dates = sorted(dates_with_values)
         intervals = [(dates[i + 1] - dates[i]).days for i in range(len(dates) - 1)]
 
         if not intervals:
             continue
 
         avg_interval = sum(intervals) / len(intervals)
-        avg_amount = sum(amounts) / len(amounts) if amounts else 0
 
         is_monthly = 28 <= avg_interval <= 31
         is_annual = 350 <= avg_interval <= 380
