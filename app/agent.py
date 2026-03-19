@@ -138,8 +138,7 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "start_date": {"type": "string", "description": "Optional start date YYYY-MM-DD. Omit for all time."},
-                    "end_date": {"type": "string", "description": "Optional end date YYYY-MM-DD. Omit for all time."},
-                    "doc_type": {"type": "string", "enum": ["receipt", "subscription", "invoice"], "description": "Optional filter by document type. Omit to include all types."}
+                    "end_date": {"type": "string", "description": "Optional end date YYYY-MM-DD. Omit for all time."}
                 }
             }
         }
@@ -154,8 +153,7 @@ TOOLS = [
                 "properties": {
                     "start_date": {"type": "string", "description": "Optional start date YYYY-MM-DD. Omit for all time."},
                     "end_date": {"type": "string", "description": "Optional end date YYYY-MM-DD. Omit for all time."},
-                    "limit": {"type": "integer", "description": "Max merchants to return", "default": 10},
-                    "doc_type": {"type": "string", "enum": ["receipt", "subscription", "invoice"], "description": "Optional filter by document type. Omit to include all types."}
+                    "limit": {"type": "integer", "description": "Max merchants to return", "default": 10}
                 }
             }
         }
@@ -164,13 +162,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_receipts_by_merchant",
-            "description": "Get all documents from a specific merchant or service. Use for 'show me Target receipts' or 'show me Netflix charges' type questions.",
+            "description": "Get all receipts from a specific merchant. Use for 'show me Target receipts' type questions.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "merchant": {"type": "string", "description": "Merchant or service name (partial match)"},
-                    "limit": {"type": "integer", "description": "Max documents to return", "default": 20},
-                    "doc_type": {"type": "string", "enum": ["receipt", "subscription", "invoice"], "description": "Optional filter by document type. Omit to include all types."}
+                    "merchant": {"type": "string", "description": "Merchant name (partial match)"},
+                    "limit": {"type": "integer", "description": "Max receipts to return", "default": 20}
                 },
                 "required": ["merchant"]
             }
@@ -180,14 +177,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_receipts_by_date_range",
-            "description": "Get all documents in a date range with dates and amounts. Use for spending trends, timelines, 'show my spending over time', or 'documents from last month' type questions.",
+            "description": "Get all receipts in a date range with dates and amounts. Use for spending trends, timelines, 'show my spending over time', or 'receipts from last month' type questions.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "start_date": {"type": "string", "description": "Start date YYYY-MM-DD"},
                     "end_date": {"type": "string", "description": "End date YYYY-MM-DD"},
-                    "limit": {"type": "integer", "description": "Max documents to return", "default": 50},
-                    "doc_type": {"type": "string", "enum": ["receipt", "subscription", "invoice"], "description": "Optional filter by document type. Omit to include all types."}
+                    "limit": {"type": "integer", "description": "Max receipts to return", "default": 50}
                 },
                 "required": ["start_date", "end_date"]
             }
@@ -219,12 +215,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_all_receipt_texts",
-            "description": "Get all extracted documents with their full item-level text. Use for broad questions that need reasoning across ALL purchases or documents (e.g., 'what unhealthy items did I buy', 'show me all electronics purchases', 'what subscriptions do I have'). Returns merchant, date, total, and full OCR text.",
+            "description": "Get all receipt documents with their full item-level text. Use for broad questions that need reasoning across ALL purchases (e.g., 'what unhealthy items did I buy', 'show me all electronics purchases', 'what did I buy most frequently'). Returns merchant, date, total, and full OCR text containing line items.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "limit": {"type": "integer", "description": "Max documents to return", "default": 50},
-                    "doc_type": {"type": "string", "enum": ["receipt", "subscription", "invoice"], "description": "Optional filter by document type. Omit to include all types."}
+                    "limit": {"type": "integer", "description": "Max receipts to return", "default": 50}
                 }
             }
         }
@@ -308,47 +303,40 @@ SYSTEM_PROMPT_BASE = """You are a helpful assistant that analyzes the user's scr
 All uploaded content is stored as searchable documents.
 Your primary goal is to extract information from these files and answer any questions the user has about that information.
 You have tools to search documents, query spending data, and retrieve document details.
-Documents are classified as receipts, subscriptions, or invoices. Many tools accept an optional doc_type filter ("receipt", "subscription", "invoice"). Use it when the user asks about a specific type (e.g., "show me my subscriptions" → doc_type="subscription"). Omit it when the user asks broadly (e.g., "total spending").
+Documents are classified as receipts, subscriptions, or invoices. Many tools accept an optional doc_type filter ("receipt", "subscription", "invoice").
 
 When answering questions:
 1. TOOL PRIORITY — Always follow this order:
    a. First, use the available local document tools to look up information from the user's own records.
-   b. Only call web_search if the local document tools returned no useful results AND the question
-      genuinely requires real-time external data that cannot exist in the user's uploaded files.
+   b. Only call web_search if the local document tools returned no useful results AND the question genuinely requires real-time external data that cannot exist in the user's uploaded files.
    c. NEVER call web_search as a first step or before attempting local document tools.
-2. Use multiple tools if needed — if your first retrieval returns no results or partial results,
-   try a broader tool before concluding. Do not give up after a single failed attempt.
-3. Analyze the results and provide a clear, helpful answer
-4. Include specific numbers, dates, and merchant names when relevant
-5. If asked about spending, always include the total amount
-6. For "when" questions: first check if a date was extracted from the document content. If no date exists, fall back to `created_at` (the upload timestamp) as an approximate date for when the event occurred
-7. CRITICAL — Source citation: You MUST end every answer with a citation tag listing all doc_ids OR web URLs you used to generate the response.
-   Format: <!--cited:source1,source2-->
-   - For internal documents: Use the 'doc_id' provided in the tool results.
-   - For web search: Use the full URL (href) provided in the search results.
-   Example: If you used a Target receipt (doc_id "abc-123") and a health article (URL "https://healthline.com"), end your answer with: <!--cited:abc-123,https://healthline.com-->
-   Only cite sources whose data you directly referenced. This tag is required even if you only used one source.
-   Do NOT add a human-readable "Source:", "Sources:", or "Reference:" section — the citation tag above is the only source attribution needed.
-8. CRITICAL: Do NOT invent items. Only list products explicitly found in the provided tool results. If the tool result does not contain a line-item breakdown, state that you can only see the total amount.
-9. CRITICAL: You must NEVER answer from memory. Always use the appropriate tool(s) to fetch data first.
-10. CRITICAL — Final answer quality: Your final response MUST report what the tools actually returned.
-    NEVER write future-tense phrases like "searching now", "let me check", "I will look", or
-    "searching for X now…" in your final answer — tools have already been called by the time
-    you write your response. Only state "I couldn't find any information about [topic]" after
-    making a genuine multi-tool effort (trying at least 2 tools). Do not give up after a single
-    empty result — try a broader retrieval approach first.
-11. CRITICAL — Autonomous action: You are an autonomous agent. NEVER tell the user to call
-    a tool, switch a category, perform a search, or take any technical action themselves.
+2. Use multiple tools if needed — if your first retrieval returns no results or partial results, try a broader tool before concluding. Do not give up after a single failed attempt.
+3. Analyze the results and provide a clear, helpful answer.
+4. Include specific numbers, dates, and merchant names only when they are explicitly present in the retrieved evidence or reliably extracted from it.
+5. If asked about spending, include the total amount only when it is explicitly present in the document or reliably extracted from it.
+6. If a required field such as total amount, billing date, renewal date, order date, or merchant is missing, unclear, or ambiguous, do not infer it from unrelated metadata. Instead, say that the information is not available or cannot be determined confidently.
+7. Do not treat subtotal, tax, tip, balance, savings, or other intermediate amounts as the final total unless the evidence explicitly indicates that it is the total.
+8. If a receipt appears cropped, incomplete, or low quality and the final total is not visible, abstain instead of guessing.
+9. For "when" questions, answer using a date explicitly found in the document content or reliably extracted from it. Do not use upload timestamps, receive timestamps, email receipt timestamps, or created_at as a substitute for the actual event date unless the user is explicitly asking about upload or receipt time.
+10. Treat merchant and subscription names in a case-insensitive way when interpreting OCR text. For example, "Chatgpt", "CHATGPT", and "ChatGPT" should be treated as the same entity when supported by the evidence.
+11. CRITICAL — Source citation: You MUST end every answer with a citation tag listing all doc_ids OR web URLs you used to generate the response.
+    Format: <!--cited:source1,source2-->
+    - For internal documents: Use the 'doc_id' provided in the tool results.
+    - For web search: Use the full URL (href) provided in the search results.
+    Only cite sources whose data you directly referenced. This tag is required even if you only used one source.
+    Do NOT add a human-readable "Source:", "Sources:", or "Reference:" section.
+12. CRITICAL: Do NOT invent items. Only report products, merchants, amounts, and dates explicitly found in the provided tool results or reliably extracted from them.
+13. CRITICAL: You must NEVER answer from memory. Always use the appropriate tool(s) to fetch data first.
+14. CRITICAL — Final answer quality: Your final response MUST report what the tools actually returned.
+    NEVER write future-tense phrases like "searching now", "let me check", or "I will look" in your final answer.
+    Only state "I couldn't find any information about [topic]" after making a genuine multi-tool effort.
+15. CRITICAL — Autonomous action: You are an autonomous agent. NEVER tell the user to call a tool, switch a category, perform a search, or take any technical action themselves.
     If a tool is needed, call it. If a category switch is needed, call request_category_change.
-    Instructing the user to do what you can do yourself is always wrong.
-12. WEB SOURCES: When using 'web_search' results, provide the answer in your own words,
-   but ALWAYS include the source title as a clickable Markdown link.
-   Example: 'According to [Healthline](https://healthline.com), lentils are a cheaper protein.'
+16. WEB SOURCES: When using web_search results, provide the answer in your own words, but ALWAYS include the source title as a clickable Markdown link.
 
-You currently have access to {category}-category tools only. If you need tools from a different category ({available_categories}), call request_category_change with the target category.
+You currently have access to {category}-category tools only. If you need tools from a different category ({available_categories}), call request_category_change.
 
-Today's date is {today}. Use this to interpret relative dates like "last month" or "this year"."""
-
+Today's date is {today}. Use this only to interpret relative dates like "last month" or "this year", not to infer missing document facts.""" 
 
 async def build_system_prompt(db, category: str) -> str:
     """Build system prompt with base instructions + mined constraints."""
@@ -402,19 +390,19 @@ async def execute_tool(db, user_id: str, tool_call: Any) -> str:
     if name == "search_documents":
         result = await search_documents(db, user_id, args["query"], limit=5)
     elif name == "get_total_spending":
-        result = await get_total_spending(db, user_id, args.get("start_date"), args.get("end_date"), doc_type=args.get("doc_type"))
+        result = await get_total_spending(db, user_id, args.get("start_date"), args.get("end_date"))
     elif name == "get_spending_by_merchant":
-        result = await get_spending_by_merchant(db, user_id, args.get("start_date"), args.get("end_date"), args.get("limit", 10), doc_type=args.get("doc_type"))
+        result = await get_spending_by_merchant(db, user_id, args.get("start_date"), args.get("end_date"), args.get("limit", 10))
     elif name == "get_receipts_by_merchant":
-        result = await get_receipts_by_merchant(db, user_id, args["merchant"], args.get("limit", 20), doc_type=args.get("doc_type"))
+        result = await get_receipts_by_merchant(db, user_id, args["merchant"], args.get("limit", 20))
     elif name == "get_receipts_by_date_range":
-        result = await get_receipts_by_date_range(db, user_id, args["start_date"], args["end_date"], args.get("limit", 50), doc_type=args.get("doc_type"))
+        result = await get_receipts_by_date_range(db, user_id, args["start_date"], args["end_date"], args.get("limit", 50))
     elif name == "get_recurring_costs":
         result = await detect_recurring_costs(db, user_id)
     elif name == "get_trips":
         result = await detect_trips(db, user_id)
     elif name == "get_all_receipt_texts":
-        result = await get_all_receipt_texts(db, user_id, args.get("limit", 50), doc_type=args.get("doc_type"))
+        result = await get_all_receipt_texts(db, user_id, args.get("limit", 50))
     elif name == "get_document_overview":
         result = await get_document_overview(db, user_id, args.get("limit", 50))
     elif name == "get_all_document_texts":
