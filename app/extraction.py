@@ -73,30 +73,6 @@ async def get_extractions_by_doc(db, doc_id: int) -> Dict[str, Any] | None:
     }
 
 
-async def get_user_receipts(db, user_id: str, limit: int = 100) -> list:
-    """Get all receipts for a user with extracted fields."""
-    query = """
-        SELECT e.id, e.merchant, e.date, e.total_amount, e.address, d.s3_key
-        FROM extractions e
-        JOIN documents d ON e.doc_id = d.id
-        WHERE d.user_id = $1 AND e.doc_type = 'receipt'
-        ORDER BY e.date DESC NULLS LAST
-        LIMIT $2
-    """
-    rows = await db.fetch(query, user_id, limit)
-
-    return [
-        {
-            "id": row["id"],
-            "merchant": row["merchant"],
-            "date": row["date"].isoformat() if row["date"] else None,
-            "total_amount": float(row["total_amount"]) if row["total_amount"] else None,
-            "address": row["address"],
-            "s3_key": row["s3_key"],
-        }
-        for row in rows
-    ]
-
 
 async def get_total_spending(db, user_id: str, start_date: str = None, end_date: str = None, doc_type: str = None) -> dict:
     """Get total spending in date range, optionally filtered by document type."""
@@ -141,7 +117,7 @@ async def get_receipts_by_merchant(db, user_id: str, merchant: str, limit: int =
         JOIN documents d ON e.doc_id = d.id
         WHERE d.user_id = $1 AND e.merchant ILIKE $2
           AND ($4::text IS NULL OR e.doc_type = $4::text)
-        ORDER BY e.date DESC
+        ORDER BY e.date DESC NULLS LAST
         LIMIT $3
     """
     rows = await db.fetch(sql, user_id, f"%{merchant}%", limit, doc_type)
@@ -163,9 +139,9 @@ async def get_receipts_by_date_range(db, user_id: str, start_date: str, end_date
         SELECT e.id, e.merchant, e.date, e.total_amount, d.id as doc_id
         FROM extractions e
         JOIN documents d ON e.doc_id = d.id
-        WHERE d.user_id = $1 AND e.date BETWEEN $2::date AND $3::date
+        WHERE d.user_id = $1 AND COALESCE(e.date, d.created_at::date) BETWEEN $2::date AND $3::date
           AND ($5::text IS NULL OR e.doc_type = $5::text)
-        ORDER BY e.date DESC
+        ORDER BY COALESCE(e.date, d.created_at::date) DESC
         LIMIT $4
     """
     rows = await db.fetch(sql, user_id, parse_date(start_date), parse_date(end_date), limit, doc_type)

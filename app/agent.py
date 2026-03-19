@@ -445,8 +445,6 @@ class AgentState(TypedDict):
     tool_results: Annotated[List[Dict[str, Any]], add]
     selected_category: str     # Tracking the active bucket
     reroute_count: int         # Safety to prevent infinite re-routing
-    _rerouting: bool           # Flag set by call_tools when category change requested
-    final_result: Dict[str, Any]
 
 async def route_query(state: AgentState):
     client = AsyncAzureOpenAI(
@@ -481,13 +479,11 @@ async def route_query(state: AgentState):
     - 'travel': Use for trips, vacations, hotel bookings, or flight clusters.
     - 'none': Use for greetings, general chat, or questions requiring no data.
 
-    RE-ROUTING LOGIC (CRITICAL):
-    1. Check if the most recent Assistant message called 'request_category_change'. 
-    2. If it did, look at the 'reason' provided and switch the category to the one that contains the missing tools.
-    3. If the user asks for "items," "products," or "line details" and you are currently in 'spending', you MUST switch to 'search'.
-    4. If the user asks about a "trip" or "vacation" and you are in 'spending' or 'search', you MUST switch to 'travel'.
-    5. Today's Date: {date.today().isoformat()}
-    6. Only use 'none' for pure greetings or off-topic chat with no connection to the user's data.
+    ROUTING RULES (CRITICAL):
+    1. If the user asks for "items," "products," or "line details" and you are currently in 'spending', you MUST switch to 'search'.
+    2. If the user asks about a "trip" or "vacation" and you are in 'spending' or 'search', you MUST switch to 'travel'.
+    3. Today's Date: {date.today().isoformat()}
+    4. Only use 'none' for pure greetings or off-topic chat with no connection to the user's data.
        When in doubt, pick the most relevant data category — any category with tools is better
        than 'none' if the question could relate to the user's uploaded documents."""
 
@@ -557,7 +553,7 @@ async def call_tools(state: AgentState):
             try:
                 reroute_args = json.loads(raw_args)
                 target_cat = reroute_args.get("target_category", "search")
-            except:
+            except (json.JSONDecodeError, KeyError):
                 reroute_args = {"target_category": "search"}
                 target_cat = "search"
             result_str = json.dumps({"status": "switching_category", "target": target_cat, "message": f"Switching to {target_cat} tools."})
@@ -568,7 +564,7 @@ async def call_tools(state: AgentState):
             result_str = await execute_tool(state["db"], state["user_id"], tool_call)
             try:
                 args = json.loads(raw_args)
-            except:
+            except (json.JSONDecodeError, TypeError):
                 args = raw_args
 
         # Append to tool messages for LLM context
@@ -600,7 +596,7 @@ async def call_tools(state: AgentState):
                     "args": args,
                     "data": data if isinstance(data, (list, dict)) else None,
                 })
-            except:
+            except (json.JSONDecodeError, TypeError, KeyError):
                 pass
         # Extract web URLs for web_search
         if name == "web_search":
@@ -617,7 +613,7 @@ async def call_tools(state: AgentState):
                     "args": args,
                     "data": data,
                 })
-            except:
+            except (json.JSONDecodeError, TypeError, KeyError):
                 pass
     # Update state: Increment reroute_count if switching categories
     current_reroutes = state.get("reroute_count", 0)
@@ -627,7 +623,6 @@ async def call_tools(state: AgentState):
         "tool_trace": new_traces,
         "tool_results": new_tool_results,
         "reroute_count": current_reroutes,
-        "_rerouting": is_rerouting,
     }
     if is_rerouting:
         result["reroute_count"] = current_reroutes + 1
@@ -702,7 +697,6 @@ async def ask_agent(db, user_id: str, question: str, history: list[dict] | None 
                 "tool_results": [],
                 "selected_category": "none",           # tool category
                 "reroute_count": 0,                    # count of re-routes
-                "_rerouting": False                    # reroute flag
             }
             
             output = await graph.ainvoke(inputs)
