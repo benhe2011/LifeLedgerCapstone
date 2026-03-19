@@ -303,40 +303,48 @@ SYSTEM_PROMPT_BASE = """You are a helpful assistant that analyzes the user's scr
 All uploaded content is stored as searchable documents.
 Your primary goal is to extract information from these files and answer any questions the user has about that information.
 You have tools to search documents, query spending data, and retrieve document details.
-Documents are classified as receipts, subscriptions, or invoices. Many tools accept an optional doc_type filter ("receipt", "subscription", "invoice").
+Documents are classified as receipts, subscriptions, or invoices. Many tools accept an optional doc_type filter ("receipt", "subscription", "invoice"). Use it when the user asks about a specific type (e.g., "show me my subscriptions" → doc_type="subscription"). Omit it when the user asks broadly (e.g., "total spending").
 
 When answering questions:
 1. TOOL PRIORITY — Always follow this order:
    a. First, use the available local document tools to look up information from the user's own records.
-   b. Only call web_search if the local document tools returned no useful results AND the question genuinely requires real-time external data that cannot exist in the user's uploaded files.
+   b. Only call web_search if the local document tools returned no useful results AND the question
+      genuinely requires real-time external data that cannot exist in the user's uploaded files.
    c. NEVER call web_search as a first step or before attempting local document tools.
-2. Use multiple tools if needed — if your first retrieval returns no results or partial results, try a broader tool before concluding. Do not give up after a single failed attempt.
+2. Use multiple tools if needed — if your first retrieval returns no results or partial results,
+   try a broader tool before concluding. Do not give up after a single failed attempt.
 3. Analyze the results and provide a clear, helpful answer.
-4. Include specific numbers, dates, and merchant names only when they are explicitly present in the retrieved evidence or reliably extracted from it.
-5. If asked about spending, include the total amount only when it is explicitly present in the document or reliably extracted from it.
-6. If a required field such as total amount, billing date, renewal date, order date, or merchant is missing, unclear, or ambiguous, do not infer it from unrelated metadata. Instead, say that the information is not available or cannot be determined confidently.
-7. Do not treat subtotal, tax, tip, balance, savings, or other intermediate amounts as the final total unless the evidence explicitly indicates that it is the total.
-8. If a receipt appears cropped, incomplete, or low quality and the final total is not visible, abstain instead of guessing.
-9. For "when" questions, answer using a date explicitly found in the document content or reliably extracted from it. Do not use upload timestamps, receive timestamps, email receipt timestamps, or created_at as a substitute for the actual event date unless the user is explicitly asking about upload or receipt time.
-10. Treat merchant and subscription names in a case-insensitive way when interpreting OCR text. For example, "Chatgpt", "CHATGPT", and "ChatGPT" should be treated as the same entity when supported by the evidence.
-11. CRITICAL — Source citation: You MUST end every answer with a citation tag listing all doc_ids OR web URLs you used to generate the response.
-    Format: <!--cited:source1,source2-->
-    - For internal documents: Use the 'doc_id' provided in the tool results.
-    - For web search: Use the full URL (href) provided in the search results.
-    Only cite sources whose data you directly referenced. This tag is required even if you only used one source.
-    Do NOT add a human-readable "Source:", "Sources:", or "Reference:" section.
-12. CRITICAL: Do NOT invent items. Only report products, merchants, amounts, and dates explicitly found in the provided tool results or reliably extracted from them.
-13. CRITICAL: You must NEVER answer from memory. Always use the appropriate tool(s) to fetch data first.
-14. CRITICAL — Final answer quality: Your final response MUST report what the tools actually returned.
-    NEVER write future-tense phrases like "searching now", "let me check", or "I will look" in your final answer.
-    Only state "I couldn't find any information about [topic]" after making a genuine multi-tool effort.
-15. CRITICAL — Autonomous action: You are an autonomous agent. NEVER tell the user to call a tool, switch a category, perform a search, or take any technical action themselves.
+4. Include specific numbers, dates, and merchant names when relevant.
+5. If asked about spending, include the total amount only when a final payable amount is explicitly supported by the retrieved document evidence. If the final amount is missing, cropped, blurred, ambiguous, or only subtotal/tax/tip values are visible, abstain instead of guessing.
+6. For "when" questions, only use a date that was explicitly extracted from the document content or clearly supported by the retrieved evidence. Do NOT use `created_at`, upload timestamps, email receipt time, screenshot time, or other metadata as a substitute for the actual event date, billing date, order date, renewal date, or travel date. If no matching date is supported by the document evidence, abstain.
+7. CRITICAL — Source citation: You MUST end every answer with a citation tag listing all doc_ids OR web URLs you used to generate the response.
+   Format: <!--cited:source1,source2-->
+   - For internal documents: Use the 'doc_id' provided in the tool results.
+   - For web search: Use the full URL (href) provided in the search results.
+   Example: If you used a Target receipt (doc_id "abc-123") and a health article (URL "https://healthline.com"), end your answer with: <!--cited:abc-123,https://healthline.com-->
+   Only cite sources whose data you directly referenced. This tag is required even if you only used one source.
+   Do NOT add a human-readable "Source:", "Sources:", or "Reference:" section — the citation tag above is the only source attribution needed.
+8. CRITICAL: Do NOT invent items. Only list products explicitly found in the provided tool results. If the tool result does not contain a line-item breakdown, state that you can only see the total amount.
+9. CRITICAL: For receipt amount questions, only report a final amount if the document explicitly shows a final payable value such as TOTAL, AMOUNT DUE, ORDER TOTAL, TOTAL PAID, or an equivalent final charge. Never treat subtotal, pre-tax subtotal, tax, tip, discount, savings, fee, or line-item sums as the final total unless the document explicitly labels them as the amount paid.
+10. CRITICAL: Merchant and subscription matching should be case-insensitive and tolerant to minor OCR casing variation (e.g., Chatgpt / CHATGPT / ChatGPT). However, do not merge different entities unless the retrieved evidence clearly supports they are the same.
+11. CRITICAL: You must NEVER answer from memory. Always use the appropriate tool(s) to fetch data first.
+12. CRITICAL — Final answer quality: Your final response MUST report what the tools actually returned.
+    NEVER write future-tense phrases like "searching now", "let me check", "I will look", or
+    "searching for X now…" in your final answer — tools have already been called by the time
+    you write your response. Only state "I couldn't find any information about [topic]" after
+    making a genuine multi-tool effort (trying at least 2 tools). Do not give up after a single
+    empty result — try a broader retrieval approach first.
+13. CRITICAL — Autonomous action: You are an autonomous agent. NEVER tell the user to call
+    a tool, switch a category, perform a search, or take any technical action themselves.
     If a tool is needed, call it. If a category switch is needed, call request_category_change.
-16. WEB SOURCES: When using web_search results, provide the answer in your own words, but ALWAYS include the source title as a clickable Markdown link.
+    Instructing the user to do what you can do yourself is always wrong.
+14. WEB SOURCES: When using 'web_search' results, provide the answer in your own words,
+   but ALWAYS include the source title as a clickable Markdown link.
+   Example: 'According to [Healthline](https://healthline.com), lentils are a cheaper protein.'
 
-You currently have access to {category}-category tools only. If you need tools from a different category ({available_categories}), call request_category_change.
+You currently have access to {category}-category tools only. If you need tools from a different category ({available_categories}), call request_category_change with the target category.
 
-Today's date is {today}. Use this only to interpret relative dates like "last month" or "this year", not to infer missing document facts.""" 
+Today's date is {today}. Use this to interpret relative dates like "last month" or "this year."""
 
 async def build_system_prompt(db, category: str) -> str:
     """Build system prompt with base instructions + mined constraints."""
@@ -433,8 +441,6 @@ class AgentState(TypedDict):
     tool_results: Annotated[List[Dict[str, Any]], add]
     selected_category: str     # Tracking the active bucket
     reroute_count: int         # Safety to prevent infinite re-routing
-    _rerouting: bool           # Flag set by call_tools when category change requested
-    final_result: Dict[str, Any]
 
 async def route_query(state: AgentState):
     client = AsyncAzureOpenAI(
@@ -469,13 +475,11 @@ async def route_query(state: AgentState):
     - 'travel': Use for trips, vacations, hotel bookings, or flight clusters.
     - 'none': Use for greetings, general chat, or questions requiring no data.
 
-    RE-ROUTING LOGIC (CRITICAL):
-    1. Check if the most recent Assistant message called 'request_category_change'. 
-    2. If it did, look at the 'reason' provided and switch the category to the one that contains the missing tools.
-    3. If the user asks for "items," "products," or "line details" and you are currently in 'spending', you MUST switch to 'search'.
-    4. If the user asks about a "trip" or "vacation" and you are in 'spending' or 'search', you MUST switch to 'travel'.
-    5. Today's Date: {date.today().isoformat()}
-    6. Only use 'none' for pure greetings or off-topic chat with no connection to the user's data.
+    ROUTING RULES (CRITICAL):
+    1. If the user asks for "items," "products," or "line details" and you are currently in 'spending', you MUST switch to 'search'.
+    2. If the user asks about a "trip" or "vacation" and you are in 'spending' or 'search', you MUST switch to 'travel'.
+    3. Today's Date: {date.today().isoformat()}
+    4. Only use 'none' for pure greetings or off-topic chat with no connection to the user's data.
        When in doubt, pick the most relevant data category — any category with tools is better
        than 'none' if the question could relate to the user's uploaded documents."""
 
@@ -545,7 +549,7 @@ async def call_tools(state: AgentState):
             try:
                 reroute_args = json.loads(raw_args)
                 target_cat = reroute_args.get("target_category", "search")
-            except:
+            except (json.JSONDecodeError, KeyError):
                 reroute_args = {"target_category": "search"}
                 target_cat = "search"
             result_str = json.dumps({"status": "switching_category", "target": target_cat, "message": f"Switching to {target_cat} tools."})
@@ -556,7 +560,7 @@ async def call_tools(state: AgentState):
             result_str = await execute_tool(state["db"], state["user_id"], tool_call)
             try:
                 args = json.loads(raw_args)
-            except:
+            except (json.JSONDecodeError, TypeError):
                 args = raw_args
 
         # Append to tool messages for LLM context
@@ -588,7 +592,7 @@ async def call_tools(state: AgentState):
                     "args": args,
                     "data": data if isinstance(data, (list, dict)) else None,
                 })
-            except:
+            except (json.JSONDecodeError, TypeError, KeyError):
                 pass
         # Extract web URLs for web_search
         if name == "web_search":
@@ -605,7 +609,7 @@ async def call_tools(state: AgentState):
                     "args": args,
                     "data": data,
                 })
-            except:
+            except (json.JSONDecodeError, TypeError, KeyError):
                 pass
     # Update state: Increment reroute_count if switching categories
     current_reroutes = state.get("reroute_count", 0)
@@ -615,7 +619,6 @@ async def call_tools(state: AgentState):
         "tool_trace": new_traces,
         "tool_results": new_tool_results,
         "reroute_count": current_reroutes,
-        "_rerouting": is_rerouting,
     }
     if is_rerouting:
         result["reroute_count"] = current_reroutes + 1
@@ -690,7 +693,6 @@ async def ask_agent(db, user_id: str, question: str, history: list[dict] | None 
                 "tool_results": [],
                 "selected_category": "none",           # tool category
                 "reroute_count": 0,                    # count of re-routes
-                "_rerouting": False                    # reroute flag
             }
             
             output = await graph.ainvoke(inputs)
