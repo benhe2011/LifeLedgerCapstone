@@ -69,13 +69,13 @@ def classify_doc_type(ocr_text: str) -> str:
     if any(kw in text_lower for kw in ["invoice", "bill to", "remit to", "amount due", "purchase order"]):
         return "invoice"
 
+    # Subscription indicators (check before receipt - subscriptions often contain "total" too)
+    if any(kw in text_lower for kw in ["renew", "subscription", "billing", "monthly", "annual"]):
+        return "subscription"
+
     # Receipt indicators
     if any(kw in text_lower for kw in ["total", "subtotal", "tax", "cash", "visa", "mastercard", "payment"]):
         return "receipt"
-
-    # Subscription indicators
-    if any(kw in text_lower for kw in ["renew", "subscription", "billing", "monthly", "annual"]):
-        return "subscription"
 
     # Warranty indicators
     if any(kw in text_lower for kw in ["warranty", "serial number", "guarantee", "coverage"]):
