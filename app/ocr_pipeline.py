@@ -174,10 +174,25 @@ async def process_image(doc_id: int, s3_key: str) -> None:
     """
     Process an image through the OCR pipeline.
     Uses semaphore to limit concurrent processing (configurable via MAX_CONCURRENT_OCR).
+    Each image gets a 2-minute timeout to prevent stuck images from blocking the batch.
     """
     async with _processing_semaphore:
         logger.info(f"Processing doc_id={doc_id}, s3_key={s3_key}")
-        await _process_image_internal(doc_id, s3_key)
+        try:
+            await asyncio.wait_for(
+                _process_image_internal(doc_id, s3_key),
+                timeout=120,
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout processing doc_id={doc_id}")
+            try:
+                from app.db import update_document, init_db
+                pool = await init_db()
+                async with pool.acquire() as db:
+                    await update_document(db, doc_id, doc_text="[Processing failed]", doc_type="other")
+                    await db.execute("UPDATE documents SET radar_processed = TRUE WHERE id = $1", doc_id)
+            except Exception as update_err:
+                logger.error(f"Failed to mark doc_id={doc_id} as failed: {update_err}")
 
 
 async def process_batch_and_crawl(docs: List[Dict[str, Any]], user_id: str) -> None:
@@ -244,6 +259,7 @@ async def _process_image_internal(doc_id: int, s3_key: str) -> None:
                     doc_text="[Processing failed]",
                     doc_type="other",
                 )
+                await db.execute("UPDATE documents SET radar_processed = TRUE WHERE id = $1", doc_id)
             logger.info(f"Marked doc_id={doc_id} as failed")
         except Exception as update_err:
             logger.error(f"Failed to mark doc_id={doc_id} as failed: {update_err}")

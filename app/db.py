@@ -330,6 +330,7 @@ async def get_user_documents(
     """Get all documents for a user with extraction data."""
     query = """
         SELECT d.id, d.s3_key, d.doc_type, d.doc_text, d.created_at,
+               d.radar_processed,
                e.merchant, e.date as extracted_date, e.total_amount
         FROM documents d
         LEFT JOIN extractions e ON d.id = e.doc_id

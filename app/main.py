@@ -136,6 +136,7 @@ class DocumentResponse(BaseModel):
     totalValue: str
     lineItems: Optional[List[LineItem]] = None
     metadata: Optional[Dict[str, Any]] = None
+    radarProcessed: bool = False
 
 
 class SafetyInfo(BaseModel):
@@ -392,6 +393,7 @@ async def search(
             primaryDate=doc.get("created_at", "")[:10],
             totalValue=_extract_total_value(doc),
             metadata=doc.get("metadata"),
+            radarProcessed=bool(doc.get("radar_processed", False)),
         ))
 
     # 7. Merge agent-cited documents not already in semantic results
@@ -426,6 +428,7 @@ async def search(
                         secondaryEntity=None,
                         primaryDate=str(doc.get("created_at", ""))[:10],
                         totalValue=_extract_total_value(doc),
+                        radarProcessed=bool(doc.get("radar_processed", False)),
                     ))
         except Exception as e:
             logger.warning("Failed to fetch cited docs: %s", e)
@@ -553,6 +556,7 @@ async def list_documents(
             "primaryEntity": _extract_primary_entity(doc),
             "primaryDate": primary_date,
             "totalValue": _extract_total_value(doc),
+            "radarProcessed": bool(doc.get("radar_processed", False)),
         })
 
     return frontend_docs
