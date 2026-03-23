@@ -350,6 +350,7 @@ async def get_user_documents(
             "merchant": row["merchant"],
             "extracted_date": row["extracted_date"].isoformat() if row["extracted_date"] else None,
             "total_amount": float(row["total_amount"]) if row["total_amount"] else None,
+            "radar_processed": row["radar_processed"],
         }
         for row in rows
     ]
