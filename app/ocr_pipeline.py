@@ -245,6 +245,10 @@ async def _process_image_internal(doc_id: int, s3_key: str) -> None:
             if result["extraction"]:
                 await save_extraction(db, doc_id, result["doc_type"], result["extraction"])
 
+            # Mark as radar-processed if no useful text for the crawler
+            if result["doc_text"] in ("[No text detected]", "[Processing failed]"):
+                await db.execute("UPDATE documents SET radar_processed = TRUE WHERE id = $1", doc_id)
+
         logger.info(f"Completed processing doc_id={doc_id}")
 
     except Exception as e:
