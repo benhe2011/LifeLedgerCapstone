@@ -65,16 +65,7 @@ def classify_doc_type(ocr_text: str) -> str:
     """Classify document type based on OCR text using heuristics."""
     text_lower = ocr_text.lower()
 
-    # Invoice indicators (check before receipt - invoices often contain "total" too)
-    if any(kw in text_lower for kw in ["invoice", "bill to", "remit to", "amount due", "purchase order"]):
-        return "invoice"
-
-    # Subscription indicators (check before receipt - subscriptions often contain "total" too)
-    if any(kw in text_lower for kw in ["renew", "subscription", "billing", "monthly", "annual",
-                                        "per month", "per year", "recurring", "autopay"]):
-        return "subscription"
-
-    # Payslip indicators (check before receipt - payslips contain "total" and "tax")
+    # Payslip indicators (check first - payslips contain "total", "tax", "monthly")
     if any(kw in text_lower for kw in [
         "pay stub", "payslip", "pay slip", "gross pay", "net pay",
         "earnings statement", "ytd", "year to date", "pay period",
@@ -83,13 +74,22 @@ def classify_doc_type(ocr_text: str) -> str:
     ]) and any(kw in text_lower for kw in ["employer", "employee", "pay period", "pay date", "gross", "net"]):
         return "payslip"
 
-    # Rental agreement indicators (check before receipt - leases contain "amount due")
+    # Rental agreement indicators (before invoice/subscription - leases contain "amount due", "monthly", "billing")
     if any(kw in text_lower for kw in [
         "lease agreement", "rental agreement", "tenant", "landlord",
         "lessee", "lessor", "rent amount", "security deposit",
         "lease term", "occupancy", "eviction", "tenancy", "premises"
     ]):
         return "rental_agreement"
+
+    # Invoice indicators (check before receipt - invoices often contain "total" too)
+    if any(kw in text_lower for kw in ["invoice", "bill to", "remit to", "amount due", "purchase order"]):
+        return "invoice"
+
+    # Subscription indicators (check before receipt - subscriptions often contain "total" too)
+    if any(kw in text_lower for kw in ["renew", "subscription", "billing", "monthly", "annual",
+                                        "per month", "per year", "recurring", "autopay"]):
+        return "subscription"
 
     # Receipt indicators
     if any(kw in text_lower for kw in ["total", "subtotal", "tax", "cash", "visa", "mastercard", "payment"]):
