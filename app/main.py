@@ -25,6 +25,10 @@ from app.extraction import (
     get_spending_by_merchant,
     detect_recurring_costs,
     detect_trips,
+    get_earnings_summary,
+    get_deductions_breakdown,
+    get_recurring_income,
+    _INCOME_DOC_TYPES,
 )
 
 # Configure logging for our app modules (uvicorn already configured root)
@@ -701,7 +705,7 @@ async def review_document(
     )
 
     # Extract fields from text for supported document types (no image needed)
-    if new_doc_type in ("receipt", "subscription", "invoice") and request.note.strip():
+    if new_doc_type in ("receipt", "subscription", "invoice", "payslip", "rental_agreement") and request.note.strip():
         from app.vlm_client import extract_document_from_text
         from app.extraction import save_extraction
         try:
@@ -830,14 +834,15 @@ async def analytics_spending(
         limit=10,
     )
 
-    # Monthly totals
+    # Monthly totals (excludes income/reference doc types)
     rows = await db.fetch(
         """SELECT TO_CHAR(COALESCE(e.date, d.created_at::date), 'YYYY-MM') as month, SUM(e.total_amount) as total
            FROM extractions e JOIN documents d ON e.doc_id = d.id
            WHERE d.user_id = $1 AND e.total_amount IS NOT NULL
              AND COALESCE(e.date, d.created_at::date) >= CURRENT_DATE - make_interval(months => $2)
+             AND e.doc_type != ALL($3::text[])
            GROUP BY month ORDER BY month""",
-        user_id, months,
+        user_id, months, list(_INCOME_DOC_TYPES),
     )
     by_month = [{"month": r["month"], "total": float(r["total"])} for r in rows]
 
@@ -884,6 +889,41 @@ async def analytics_trips(
     }
 
 
+@app.get("/analytics/income")
+async def analytics_income(
+    months: int = 6,
+    user_id: str = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Get income analytics from payslips."""
+    from datetime import datetime as dt, timedelta
+    end_date = dt.now().date()
+    start_date = end_date - timedelta(days=30 * months)
+
+    earnings = await get_earnings_summary(
+        db, user_id,
+        start_date=start_date.isoformat(),
+        end_date=end_date.isoformat(),
+    )
+    deductions = await get_deductions_breakdown(
+        db, user_id,
+        start_date=start_date.isoformat(),
+        end_date=end_date.isoformat(),
+    )
+    recurring = await get_recurring_income(db, user_id)
+
+    total_net = sum(e["net_pay"] for e in earnings if e["net_pay"])
+    total_gross = sum(e["gross_pay"] for e in earnings if e["gross_pay"])
+
+    return {
+        "earnings": earnings,
+        "deductions": deductions,
+        "recurring_income": recurring,
+        "total_net": round(total_net, 2),
+        "total_gross": round(total_gross, 2),
+    }
+
+
 # Helper functions for frontend format conversion
 def _get_status(doc: dict) -> str:
     """Determine document status from doc_text."""
@@ -905,6 +945,8 @@ def _normalize_doc_type(doc_type: str) -> str:
         "form": "Form",
         "warranty": "Form",
         "insurance": "Form",
+        "payslip": "Payslip",
+        "rental_agreement": "Rental Agreement",
         "other": "Other",
         "unknown": "Other",
     }

@@ -120,6 +120,33 @@ GOLDEN_DATASET = [
     ("Read me the text from that poster I uploaded", "get_all_document_texts"),
     ("What did that email I uploaded say?", "get_all_document_texts"),
 
+    # === get_earnings_summary ===
+    ("how much did I earn last month", "get_earnings_summary"),
+    ("show my income over time", "get_earnings_summary"),
+    ("what was my last paycheck", "get_earnings_summary"),
+
+    # === get_deductions_breakdown ===
+    ("how much tax did I pay this year", "get_deductions_breakdown"),
+    ("show my deductions breakdown", "get_deductions_breakdown"),
+    ("total withholdings", "get_deductions_breakdown"),
+    ("how much went to 401k", "get_deductions_breakdown"),
+
+    # === get_income_vs_spending ===
+    ("am I saving money", "get_income_vs_spending"),
+    ("income vs expenses", "get_income_vs_spending"),
+    ("what's my net savings", "get_income_vs_spending"),
+    ("financial overview", "get_income_vs_spending"),
+
+    # === get_recurring_income ===
+    ("how often do I get paid", "get_recurring_income"),
+    ("what's my salary", "get_recurring_income"),
+
+    # === get_lease_details ===
+    ("what's my rent", "get_lease_details"),
+    ("when does my lease end", "get_lease_details"),
+    ("how much is my security deposit", "get_lease_details"),
+    ("show my rental agreement", "get_lease_details"),
+
     # === search_documents ===
     ("Find documents about insurance", "search_documents"),
     ("Do I have anything about a rental agreement?", "search_documents"),

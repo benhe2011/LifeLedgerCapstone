@@ -1,4 +1,5 @@
 """Field extraction and storage for structured document data."""
+import json as _json
 from typing import Dict, Any, List
 from datetime import datetime, date, timedelta
 from collections import defaultdict
@@ -32,9 +33,12 @@ async def save_extraction(db, doc_id: int, doc_type: str, fields: Dict[str, Any]
         except (ValueError, TypeError):
             pass
 
+    metadata = fields.get("metadata")
+    metadata_json = _json.dumps(metadata) if metadata else '{}'
+
     query = """
-        INSERT INTO extractions (doc_id, doc_type, merchant, date, total_amount, address)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO extractions (doc_id, doc_type, merchant, date, total_amount, address, metadata)
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
         RETURNING id
     """
 
@@ -46,6 +50,7 @@ async def save_extraction(db, doc_id: int, doc_type: str, fields: Dict[str, Any]
         date_value,
         total_amount,
         fields.get("address"),
+        metadata_json,
     )
 
     return result
@@ -54,7 +59,7 @@ async def save_extraction(db, doc_id: int, doc_type: str, fields: Dict[str, Any]
 async def get_extractions_by_doc(db, doc_id: int) -> Dict[str, Any] | None:
     """Get extractions for a document."""
     query = """
-        SELECT id, doc_type, merchant, date, total_amount, address
+        SELECT id, doc_type, merchant, date, total_amount, address, metadata
         FROM extractions
         WHERE doc_id = $1
     """
@@ -70,8 +75,14 @@ async def get_extractions_by_doc(db, doc_id: int) -> Dict[str, Any] | None:
         "date": row["date"].isoformat() if row["date"] else None,
         "total_amount": float(row["total_amount"]) if row["total_amount"] else None,
         "address": row["address"],
+        "metadata": _json.loads(row["metadata"]) if row["metadata"] else {},
     }
 
+
+
+# Document types that represent income or reference documents, not expenses.
+# Excluded from spending aggregation queries.
+_INCOME_DOC_TYPES = ('payslip', 'rental_agreement')
 
 
 async def get_total_spending(db, user_id: str, start_date: str = None, end_date: str = None, doc_type: str = None) -> dict:
@@ -84,8 +95,9 @@ async def get_total_spending(db, user_id: str, start_date: str = None, end_date:
           AND ($2::date IS NULL OR COALESCE(e.date, d.created_at::date) >= $2::date)
           AND ($3::date IS NULL OR COALESCE(e.date, d.created_at::date) <= $3::date)
           AND ($4::text IS NULL OR e.doc_type = $4::text)
+          AND e.doc_type != ALL($5::text[])
     """
-    row = await db.fetchrow(sql, user_id, parse_date(start_date), parse_date(end_date), doc_type)
+    row = await db.fetchrow(sql, user_id, parse_date(start_date), parse_date(end_date), doc_type, list(_INCOME_DOC_TYPES))
     return {"total": float(row["total"]), "receipt_count": row["count"]}
 
 
@@ -100,11 +112,12 @@ async def get_spending_by_merchant(db, user_id: str, start_date: str = None, end
           AND ($2::date IS NULL OR COALESCE(e.date, d.created_at::date) >= $2::date)
           AND ($3::date IS NULL OR COALESCE(e.date, d.created_at::date) <= $3::date)
           AND ($5::text IS NULL OR e.doc_type = $5::text)
+          AND e.doc_type != ALL($6::text[])
         GROUP BY e.merchant
         ORDER BY total DESC
         LIMIT $4
     """
-    rows = await db.fetch(sql, user_id, parse_date(start_date), parse_date(end_date), limit, doc_type)
+    rows = await db.fetch(sql, user_id, parse_date(start_date), parse_date(end_date), limit, doc_type, list(_INCOME_DOC_TYPES))
     return [{"merchant": r["merchant"], "total": float(r["total"]), "count": r["count"],
              "doc_ids": [str(did) for did in r["doc_ids"]]} for r in rows]
 
@@ -117,10 +130,11 @@ async def get_receipts_by_merchant(db, user_id: str, merchant: str, limit: int =
         JOIN documents d ON e.doc_id = d.id
         WHERE d.user_id = $1 AND e.merchant ILIKE $2
           AND ($4::text IS NULL OR e.doc_type = $4::text)
+          AND e.doc_type != ALL($5::text[])
         ORDER BY e.date DESC NULLS LAST
         LIMIT $3
     """
-    rows = await db.fetch(sql, user_id, f"%{merchant}%", limit, doc_type)
+    rows = await db.fetch(sql, user_id, f"%{merchant}%", limit, doc_type, list(_INCOME_DOC_TYPES))
     return [
         {
             "id": r["id"],
@@ -141,10 +155,11 @@ async def get_receipts_by_date_range(db, user_id: str, start_date: str, end_date
         JOIN documents d ON e.doc_id = d.id
         WHERE d.user_id = $1 AND COALESCE(e.date, d.created_at::date) BETWEEN $2::date AND $3::date
           AND ($5::text IS NULL OR e.doc_type = $5::text)
+          AND e.doc_type != ALL($6::text[])
         ORDER BY COALESCE(e.date, d.created_at::date) DESC
         LIMIT $4
     """
-    rows = await db.fetch(sql, user_id, parse_date(start_date), parse_date(end_date), limit, doc_type)
+    rows = await db.fetch(sql, user_id, parse_date(start_date), parse_date(end_date), limit, doc_type, list(_INCOME_DOC_TYPES))
     return [
         {
             "id": r["id"],
@@ -166,10 +181,11 @@ async def get_all_receipt_texts(db, user_id: str, limit: int = 50, doc_type: str
         WHERE d.user_id = $1
           AND d.doc_text NOT IN ('[No text detected]', '[Processing failed]')
           AND ($3::text IS NULL OR e.doc_type = $3::text)
+          AND e.doc_type != ALL($4::text[])
         ORDER BY e.date DESC NULLS LAST
         LIMIT $2
     """
-    rows = await db.fetch(sql, user_id, limit, doc_type)
+    rows = await db.fetch(sql, user_id, limit, doc_type, list(_INCOME_DOC_TYPES))
     return [
         {
             "merchant": r["merchant"],
@@ -236,12 +252,13 @@ async def get_all_document_texts(db, user_id: str, limit: int = 30) -> list:
 
 async def detect_recurring_costs(db, user_id: str) -> List[dict]:
     """Detect recurring charges by analyzing purchase intervals per merchant
-    and including documents explicitly classified as subscriptions."""
+    and including documents explicitly classified as subscriptions or rental agreements."""
     sql = """
         SELECT e.merchant, e.date, e.total_amount, e.doc_type
         FROM extractions e
         JOIN documents d ON e.doc_id = d.id
         WHERE d.user_id = $1 AND e.merchant IS NOT NULL
+          AND e.doc_type NOT IN ('payslip')
         ORDER BY e.merchant, e.date
     """
     rows = await db.fetch(sql, user_id)
@@ -254,7 +271,7 @@ async def detect_recurring_costs(db, user_id: str) -> List[dict]:
             "date": r["date"],
             "amount": float(r["total_amount"]) if r["total_amount"] else 0,
         })
-        if r["doc_type"] == "subscription":
+        if r["doc_type"] in ("subscription", "rental_agreement"):
             merchant_has_subscription[r["merchant"]] = True
 
     results = []
@@ -403,6 +420,201 @@ async def detect_trips(db, user_id: str, proximity_days: int = 3) -> List[dict]:
                 }
                 for d in trip_docs
             ],
+        })
+
+    return results
+
+
+# --- Income / Payslip / Rental Agreement Functions ---
+
+async def get_earnings_summary(db, user_id: str, start_date: str = None, end_date: str = None, limit: int = 50) -> list:
+    """Get earnings summary from payslips over time."""
+    sql = """
+        SELECT e.merchant, e.date, e.total_amount, e.metadata,
+               d.id as doc_id
+        FROM extractions e
+        JOIN documents d ON e.doc_id = d.id
+        WHERE d.user_id = $1 AND e.doc_type = 'payslip'
+          AND ($2::date IS NULL OR COALESCE(e.date, d.created_at::date) >= $2::date)
+          AND ($3::date IS NULL OR COALESCE(e.date, d.created_at::date) <= $3::date)
+        ORDER BY e.date DESC NULLS LAST
+        LIMIT $4
+    """
+    rows = await db.fetch(sql, user_id, parse_date(start_date), parse_date(end_date), limit)
+    results = []
+    for r in rows:
+        meta = _json.loads(r["metadata"]) if r["metadata"] else {}
+        earnings = meta.get("earnings", {})
+        gross = sum(v for k, v in earnings.items() if k != "other" and v) + \
+                sum(item["amount"] for item in earnings.get("other", []) if item.get("amount"))
+        results.append({
+            "employer": r["merchant"],
+            "date": r["date"].isoformat() if r["date"] else None,
+            "net_pay": float(r["total_amount"]) if r["total_amount"] else None,
+            "gross_pay": round(gross, 2) if gross else None,
+            "doc_id": r["doc_id"],
+        })
+    return results
+
+
+async def get_deductions_breakdown(db, user_id: str, start_date: str = None, end_date: str = None) -> dict:
+    """Aggregate payslip deductions across a date range."""
+    sql = """
+        SELECT e.metadata
+        FROM extractions e
+        JOIN documents d ON e.doc_id = d.id
+        WHERE d.user_id = $1 AND e.doc_type = 'payslip'
+          AND ($2::date IS NULL OR COALESCE(e.date, d.created_at::date) >= $2::date)
+          AND ($3::date IS NULL OR COALESCE(e.date, d.created_at::date) <= $3::date)
+    """
+    rows = await db.fetch(sql, user_id, parse_date(start_date), parse_date(end_date))
+
+    totals = defaultdict(float)
+    other_totals = defaultdict(float)
+    for r in rows:
+        meta = _json.loads(r["metadata"]) if r["metadata"] else {}
+        deductions = meta.get("deductions", {})
+        for key, val in deductions.items():
+            if key == "other":
+                for item in (val or []):
+                    if item.get("amount"):
+                        other_totals[item["label"]] += item["amount"]
+            elif val:
+                totals[key] += val
+
+    return {
+        "canonical": {k: round(v, 2) for k, v in totals.items()},
+        "other": {k: round(v, 2) for k, v in other_totals.items()},
+        "total_deductions": round(sum(totals.values()) + sum(other_totals.values()), 2),
+    }
+
+
+async def get_income_vs_spending(db, user_id: str, start_date: str = None, end_date: str = None) -> dict:
+    """Compare monthly income (from payslips) vs spending (from other docs)."""
+    income_sql = """
+        SELECT TO_CHAR(COALESCE(e.date, d.created_at::date), 'YYYY-MM') as month,
+               SUM(e.total_amount) as total
+        FROM extractions e JOIN documents d ON e.doc_id = d.id
+        WHERE d.user_id = $1 AND e.doc_type = 'payslip' AND e.total_amount IS NOT NULL
+          AND ($2::date IS NULL OR COALESCE(e.date, d.created_at::date) >= $2::date)
+          AND ($3::date IS NULL OR COALESCE(e.date, d.created_at::date) <= $3::date)
+        GROUP BY month ORDER BY month
+    """
+    spending_sql = """
+        SELECT TO_CHAR(COALESCE(e.date, d.created_at::date), 'YYYY-MM') as month,
+               SUM(e.total_amount) as total
+        FROM extractions e JOIN documents d ON e.doc_id = d.id
+        WHERE d.user_id = $1 AND e.doc_type != ALL($4::text[])
+          AND e.total_amount IS NOT NULL
+          AND ($2::date IS NULL OR COALESCE(e.date, d.created_at::date) >= $2::date)
+          AND ($3::date IS NULL OR COALESCE(e.date, d.created_at::date) <= $3::date)
+        GROUP BY month ORDER BY month
+    """
+    sd, ed = parse_date(start_date), parse_date(end_date)
+    income_rows = await db.fetch(income_sql, user_id, sd, ed)
+    spending_rows = await db.fetch(spending_sql, user_id, sd, ed, list(_INCOME_DOC_TYPES))
+
+    income_by_month = {r["month"]: float(r["total"]) for r in income_rows}
+    spending_by_month = {r["month"]: float(r["total"]) for r in spending_rows}
+
+    all_months = sorted(set(income_by_month) | set(spending_by_month))
+    return {
+        "months": [
+            {
+                "month": m,
+                "income": round(income_by_month.get(m, 0), 2),
+                "spending": round(spending_by_month.get(m, 0), 2),
+                "net": round(income_by_month.get(m, 0) - spending_by_month.get(m, 0), 2),
+            }
+            for m in all_months
+        ],
+        "total_income": round(sum(income_by_month.values()), 2),
+        "total_spending": round(sum(spending_by_month.values()), 2),
+        "total_net": round(sum(income_by_month.values()) - sum(spending_by_month.values()), 2),
+    }
+
+
+async def get_lease_details(db, user_id: str) -> list:
+    """Get rental agreement details for the user."""
+    sql = """
+        SELECT e.merchant, e.date, e.total_amount, e.address, e.metadata,
+               d.id as doc_id
+        FROM extractions e
+        JOIN documents d ON e.doc_id = d.id
+        WHERE d.user_id = $1 AND e.doc_type = 'rental_agreement'
+        ORDER BY e.date DESC NULLS LAST
+    """
+    rows = await db.fetch(sql, user_id)
+    results = []
+    for r in rows:
+        meta = _json.loads(r["metadata"]) if r["metadata"] else {}
+        results.append({
+            "landlord": r["merchant"],
+            "lease_start": r["date"].isoformat() if r["date"] else None,
+            "monthly_rent": float(r["total_amount"]) if r["total_amount"] else None,
+            "property_address": r["address"],
+            "tenant": meta.get("tenant"),
+            "security_deposit": meta.get("security_deposit"),
+            "lease_end": meta.get("lease_end"),
+            "term_months": meta.get("term_months"),
+            "doc_id": r["doc_id"],
+        })
+    return results
+
+
+async def get_recurring_income(db, user_id: str) -> list:
+    """Detect recurring income from payslip patterns."""
+    sql = """
+        SELECT e.merchant, e.date, e.total_amount
+        FROM extractions e
+        JOIN documents d ON e.doc_id = d.id
+        WHERE d.user_id = $1 AND e.doc_type = 'payslip' AND e.merchant IS NOT NULL
+        ORDER BY e.merchant, e.date
+    """
+    rows = await db.fetch(sql, user_id)
+
+    by_employer: Dict[str, list] = defaultdict(list)
+    for r in rows:
+        by_employer[r["merchant"]].append({
+            "date": r["date"],
+            "amount": float(r["total_amount"]) if r["total_amount"] else 0,
+        })
+
+    results = []
+    for employer, paychecks in by_employer.items():
+        amounts = [p["amount"] for p in paychecks if p["amount"]]
+        avg_amount = sum(amounts) / len(amounts) if amounts else 0
+        dates = sorted([p["date"] for p in paychecks if p["date"]])
+
+        if len(dates) >= 2:
+            intervals = [(dates[i+1] - dates[i]).days for i in range(len(dates)-1)]
+            avg_interval = sum(intervals) / len(intervals)
+        else:
+            avg_interval = 30  # Default assumption for single payslip
+
+        # Determine pay frequency
+        if 12 <= avg_interval <= 16:
+            frequency = "biweekly"
+            monthly_estimate = avg_amount * 26 / 12
+        elif 28 <= avg_interval <= 31:
+            frequency = "monthly"
+            monthly_estimate = avg_amount
+        elif 6 <= avg_interval <= 8:
+            frequency = "weekly"
+            monthly_estimate = avg_amount * 52 / 12
+        else:
+            frequency = "other"
+            monthly_estimate = avg_amount * (365 / avg_interval) / 12 if avg_interval > 0 else avg_amount
+
+        last_date = dates[-1] if dates else None
+        results.append({
+            "employer": employer,
+            "frequency": frequency,
+            "avg_net_pay": round(avg_amount, 2),
+            "monthly_estimate": round(monthly_estimate, 2),
+            "annual_estimate": round(monthly_estimate * 12, 2),
+            "last_pay_date": last_date.isoformat() if last_date else None,
+            "paycheck_count": len(paychecks),
         })
 
     return results
