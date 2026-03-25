@@ -360,9 +360,10 @@ async def detect_trips(db, user_id: str, proximity_days: int = 3) -> List[dict]:
         FROM extractions e
         JOIN documents d ON e.doc_id = d.id
         WHERE d.user_id = $1 AND e.date IS NOT NULL
+          AND e.doc_type != ALL($2::text[])
         ORDER BY e.date
     """
-    rows = await db.fetch(sql, user_id)
+    rows = await db.fetch(sql, user_id, list(_INCOME_DOC_TYPES))
 
     # Filter to travel-related documents
     travel_docs = []
