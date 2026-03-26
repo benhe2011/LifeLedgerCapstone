@@ -19,6 +19,11 @@ from app.extraction import (
     get_all_document_texts,
     detect_recurring_costs,
     detect_trips,
+    get_earnings_summary,
+    get_deductions_breakdown,
+    get_income_vs_spending,
+    get_lease_details,
+    get_recurring_income,
 )
 from app.content_safety import (
     shield_agent_prompt,
@@ -139,7 +144,7 @@ TOOLS = [
                 "properties": {
                     "start_date": {"type": "string", "description": "Optional start date YYYY-MM-DD. Omit for all time."},
                     "end_date": {"type": "string", "description": "Optional end date YYYY-MM-DD. Omit for all time."},
-                    "doc_type": {"type": "string", "enum": ["receipt", "subscription", "invoice"], "description": "Optional filter by document type. Omit to include all types."}
+                    "doc_type": {"type": "string", "enum": ["receipt", "subscription", "invoice", "payslip", "rental_agreement"], "description": "Optional filter by document type. Omit to include all types."}
                 }
             }
         }
@@ -155,7 +160,7 @@ TOOLS = [
                     "start_date": {"type": "string", "description": "Optional start date YYYY-MM-DD. Omit for all time."},
                     "end_date": {"type": "string", "description": "Optional end date YYYY-MM-DD. Omit for all time."},
                     "limit": {"type": "integer", "description": "Max merchants to return", "default": 10},
-                    "doc_type": {"type": "string", "enum": ["receipt", "subscription", "invoice"], "description": "Optional filter by document type. Omit to include all types."}
+                    "doc_type": {"type": "string", "enum": ["receipt", "subscription", "invoice", "payslip", "rental_agreement"], "description": "Optional filter by document type. Omit to include all types."}
                 }
             }
         }
@@ -170,7 +175,7 @@ TOOLS = [
                 "properties": {
                     "merchant": {"type": "string", "description": "Merchant or service name (partial match)"},
                     "limit": {"type": "integer", "description": "Max documents to return", "default": 20},
-                    "doc_type": {"type": "string", "enum": ["receipt", "subscription", "invoice"], "description": "Optional filter by document type. Omit to include all types."}
+                    "doc_type": {"type": "string", "enum": ["receipt", "subscription", "invoice", "payslip", "rental_agreement"], "description": "Optional filter by document type. Omit to include all types."}
                 },
                 "required": ["merchant"]
             }
@@ -187,7 +192,7 @@ TOOLS = [
                     "start_date": {"type": "string", "description": "Start date YYYY-MM-DD"},
                     "end_date": {"type": "string", "description": "End date YYYY-MM-DD"},
                     "limit": {"type": "integer", "description": "Max documents to return", "default": 50},
-                    "doc_type": {"type": "string", "enum": ["receipt", "subscription", "invoice"], "description": "Optional filter by document type. Omit to include all types."}
+                    "doc_type": {"type": "string", "enum": ["receipt", "subscription", "invoice", "payslip", "rental_agreement"], "description": "Optional filter by document type. Omit to include all types."}
                 },
                 "required": ["start_date", "end_date"]
             }
@@ -224,7 +229,7 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "limit": {"type": "integer", "description": "Max documents to return", "default": 50},
-                    "doc_type": {"type": "string", "enum": ["receipt", "subscription", "invoice"], "description": "Optional filter by document type. Omit to include all types."}
+                    "doc_type": {"type": "string", "enum": ["receipt", "subscription", "invoice", "payslip", "rental_agreement"], "description": "Optional filter by document type. Omit to include all types."}
                 }
             }
         }
@@ -256,6 +261,71 @@ TOOLS = [
         }
     },
     {
+        "type": "function",
+        "function": {
+            "name": "get_earnings_summary",
+            "description": "Get earnings/income from payslips over time. Returns employer, pay date, net pay, and gross pay for each payslip. Use for 'how much did I earn', 'show my income', 'payslip history' questions. Omit dates to query ALL TIME.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_date": {"type": "string", "description": "Optional start date YYYY-MM-DD. Omit for all time."},
+                    "end_date": {"type": "string", "description": "Optional end date YYYY-MM-DD. Omit for all time."},
+                    "limit": {"type": "integer", "description": "Max payslips to return", "default": 50}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_deductions_breakdown",
+            "description": "Get aggregated payslip deductions breakdown (federal tax, state tax, social security, medicare, 401k, health insurance, etc.). Use for 'how much tax did I pay', 'show my deductions', 'total withholdings' questions. Omit dates to query ALL TIME.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_date": {"type": "string", "description": "Optional start date YYYY-MM-DD. Omit for all time."},
+                    "end_date": {"type": "string", "description": "Optional end date YYYY-MM-DD. Omit for all time."}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_income_vs_spending",
+            "description": "Compare monthly income (from payslips) against spending (from receipts, subscriptions, invoices). Returns income, spending, and net savings per month. Use for 'am I saving money', 'income vs expenses', 'net savings', 'financial overview' questions. Omit dates to query ALL TIME.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_date": {"type": "string", "description": "Optional start date YYYY-MM-DD. Omit for all time."},
+                    "end_date": {"type": "string", "description": "Optional end date YYYY-MM-DD. Omit for all time."}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_lease_details",
+            "description": "Get rental agreement details: landlord, rent amount, lease dates, security deposit, property address. Use for 'what's my rent', 'when does my lease end', 'show my rental agreement', 'security deposit' questions.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_recurring_income",
+            "description": "Detect recurring income patterns from payslips. Returns employer, pay frequency (weekly/biweekly/monthly), average net pay, and estimated monthly/annual income. Use for 'how often do I get paid', 'what's my salary', 'recurring income' questions.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
     "type": "function",
     "function": {
         "name": "web_search",
@@ -279,9 +349,13 @@ TOOLS = [
 ]
 
 TOOL_BUCKETS = {
-    "spending": ["get_total_spending", "get_spending_by_merchant", "get_receipts_by_merchant", "get_receipts_by_date_range", "get_recurring_costs", "web_search"],
-    "search": ["search_documents", "get_document_overview", "get_all_document_texts", "get_all_receipt_texts", "web_search"],
-    "travel": ["get_trips", "web_search"]
+    "spending": ["get_total_spending", "get_spending_by_merchant", "get_receipts_by_merchant",
+                 "get_receipts_by_date_range", "get_recurring_costs", "web_search"],
+    "search": ["search_documents", "get_document_overview", "get_all_document_texts",
+               "get_all_receipt_texts", "get_lease_details", "web_search"],
+    "income": ["get_earnings_summary", "get_deductions_breakdown", "get_income_vs_spending",
+               "get_recurring_income", "web_search"],
+    "travel": ["get_trips", "web_search"],
 }
 
 REROUTE_TOOL = {
@@ -308,7 +382,26 @@ SYSTEM_PROMPT_BASE = """You are a helpful assistant that analyzes the user's scr
 All uploaded content is stored as searchable documents.
 Your primary goal is to extract information from these files and answer any questions the user has about that information.
 You have tools to search documents, query spending data, and retrieve document details.
-Documents are classified as receipts, subscriptions, or invoices. Many tools accept an optional doc_type filter ("receipt", "subscription", "invoice"). Use it when the user asks about a specific type (e.g., "show me my subscriptions" → doc_type="subscription"). Omit it when the user asks broadly (e.g., "total spending").
+Documents are classified as: receipts, subscriptions, invoices, payslips, and rental agreements.
+Many tools accept an optional doc_type filter. Use it when the user asks about a specific type.
+
+CRITICAL — Income vs. Spending:
+- Payslips represent INCOME (money the user earns), not spending. NEVER include payslip amounts in spending totals or spending breakdowns.
+- When the user asks about spending, costs, or expenses: use spending tools (get_total_spending, get_spending_by_merchant, etc.). These automatically exclude payslips.
+- When the user asks about income, earnings, salary, or pay: use income tools (get_earnings_summary, get_deductions_breakdown, get_recurring_income).
+- When the user asks about savings, net income, or financial overview: use get_income_vs_spending to compare both.
+- Payslip deductions (taxes, insurance, 401k) are NOT separate expenses — they are part of the payslip. Use get_deductions_breakdown to analyze them, not spending tools.
+
+CRITICAL — Rental Agreements:
+- Rental agreements are reference documents representing an ongoing obligation, not a one-time transaction.
+- The rent amount is a recurring monthly cost. Use get_recurring_costs to surface it (it appears automatically alongside subscriptions).
+- For lease details (end date, deposit, terms): use get_lease_details.
+- Do NOT count the rental agreement total_amount as a single spending event.
+
+CRITICAL — Tax ambiguity:
+- "How much tax did I pay" likely refers to payslip deductions (federal/state income tax withholdings). Use get_deductions_breakdown.
+- "How much sales tax" refers to receipt-level tax. Use spending/search tools to find receipts with tax line items.
+- If ambiguous, prefer payslip deductions and mention that sales tax from receipts is a separate query.
 
 When answering questions:
 1. TOOL PRIORITY — Always follow this order:
@@ -419,6 +512,16 @@ async def execute_tool(db, user_id: str, tool_call: Any) -> str:
         result = await get_document_overview(db, user_id, args.get("limit", 50))
     elif name == "get_all_document_texts":
         result = await get_all_document_texts(db, user_id, args.get("limit", 30))
+    elif name == "get_earnings_summary":
+        result = await get_earnings_summary(db, user_id, args.get("start_date"), args.get("end_date"), args.get("limit", 50))
+    elif name == "get_deductions_breakdown":
+        result = await get_deductions_breakdown(db, user_id, args.get("start_date"), args.get("end_date"))
+    elif name == "get_income_vs_spending":
+        result = await get_income_vs_spending(db, user_id, args.get("start_date"), args.get("end_date"))
+    elif name == "get_lease_details":
+        result = await get_lease_details(db, user_id)
+    elif name == "get_recurring_income":
+        result = await get_recurring_income(db, user_id)
     elif name == "web_search":
         query = args.get("query")
         try:
@@ -475,15 +578,18 @@ async def route_query(state: AgentState):
     CURRENT ACTIVE CATEGORY: '{current_cat}'
     CATEGORIES:
     - 'spending': Use for totals, aggregate spending, trends, or merchant-level summaries (how much, where, when).
-    - 'search': Use for specific items, products, line-item details, or "what" was purchased (what did I buy, item list).
+    - 'search': Use for specific items, products, line-item details, "what" was purchased, lease/rental details.
+    - 'income': Use for earnings, salary, payslips, deductions, tax withholdings, income vs spending, net savings, financial overview.
     - 'travel': Use for trips, vacations, hotel bookings, or flight clusters.
     - 'none': Use for greetings, general chat, or questions requiring no data.
 
     ROUTING RULES (CRITICAL):
     1. If the user asks for "items," "products," or "line details" and you are currently in 'spending', you MUST switch to 'search'.
     2. If the user asks about a "trip" or "vacation" and you are in 'spending' or 'search', you MUST switch to 'travel'.
-    3. Today's Date: {date.today().isoformat()}
-    4. Only use 'none' for pure greetings or off-topic chat with no connection to the user's data.
+    3. If the user asks about income, earnings, salary, pay, deductions, tax withholdings, or savings: use 'income'.
+    4. If the user asks about rent, lease, landlord, security deposit: use 'search' (lease details are in search bucket).
+    5. Today's Date: {date.today().isoformat()}
+    6. Only use 'none' for pure greetings or off-topic chat with no connection to the user's data.
        When in doubt, pick the most relevant data category — any category with tools is better
        than 'none' if the question could relate to the user's uploaded documents."""
 

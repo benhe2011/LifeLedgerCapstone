@@ -118,8 +118,14 @@ async def create_tables():
                 merchant TEXT,
                 date DATE,
                 total_amount DECIMAL,
-                address TEXT
+                address TEXT,
+                metadata JSONB DEFAULT '{}'
             )
+        """)
+
+        # Add metadata column if table already existed without it
+        await conn.execute("""
+            ALTER TABLE extractions ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'
         """)
 
         # Feedback loop tables: track agent responses across regeneration sessions

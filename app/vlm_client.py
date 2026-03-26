@@ -140,6 +140,32 @@ Example: {"merchant": "Netflix", "date": "2024-03-01", "total_amount": 15.99, "a
 
 Respond in JSON format only. If a field is not found, use null.
 Example: {"merchant": "Acme Corp", "date": "2024-02-20", "total_amount": 1250.00, "address": "456 Commerce Blvd"}""",
+
+    "payslip": """You are a payslip parsing assistant. Extract the following fields from this payslip image:
+- merchant: Employer/company name
+- date: Pay date (YYYY-MM-DD format)
+- total_amount: Net pay / take-home pay (numeric, no currency symbol)
+- address: Employer address if visible
+- metadata: Object with earnings breakdown, deductions breakdown, and pay period details (see below)
+
+For metadata.earnings, map each earnings line to the closest key: regular, overtime, bonus, commission, tips, pto_payout, reimbursement. Use null for absent items. If a line doesn't match, add to "other" as {"label": "...", "amount": numeric}.
+
+For metadata.deductions, map each deduction line to the closest key: federal_tax, state_tax, local_tax, social_security, medicare, retirement_401k, roth_401k, health_insurance, dental_insurance, vision_insurance, hsa, fsa, life_insurance, disability_insurance, union_dues, garnishments. Use null for absent items. If a line doesn't match, add to "other" as {"label": "...", "amount": numeric}.
+
+Also extract in metadata: pay_period_start (YYYY-MM-DD or null), pay_period_end (YYYY-MM-DD or null), ytd_gross (numeric or null), ytd_net (numeric or null).
+
+Respond in JSON format only. If a field is not found, use null.
+Example: {"merchant": "Acme Corp", "date": "2026-03-15", "total_amount": 3890.50, "address": "123 Business Blvd", "metadata": {"earnings": {"regular": 4000.00, "overtime": 600.00, "bonus": null, "commission": null, "tips": null, "pto_payout": null, "reimbursement": null, "other": []}, "deductions": {"federal_tax": 780.00, "state_tax": 312.00, "local_tax": null, "social_security": 322.00, "medicare": 75.30, "retirement_401k": 500.00, "roth_401k": null, "health_insurance": 150.00, "dental_insurance": 25.00, "vision_insurance": 10.00, "hsa": null, "fsa": null, "life_insurance": null, "disability_insurance": null, "union_dues": null, "garnishments": null, "other": []}, "pay_period_start": "2026-03-01", "pay_period_end": "2026-03-15", "ytd_gross": 23000.00, "ytd_net": 17200.00}}""",
+
+    "rental_agreement": """You are a rental agreement parsing assistant. Extract the following fields from this lease/rental agreement image:
+- merchant: Landlord or property management company name
+- date: Lease start date (YYYY-MM-DD format)
+- total_amount: Monthly rent amount (numeric, no currency symbol)
+- address: Property/rental address
+- metadata: Object with tenant, security_deposit (numeric or null), lease_end (YYYY-MM-DD or null), term_months (integer or null), utilities_included (list of strings or null), pet_deposit (numeric or null), late_fee (numeric or null)
+
+Respond in JSON format only. If a field is not found, use null.
+Example: {"merchant": "Skyline Property Management", "date": "2026-01-01", "total_amount": 2400.00, "address": "456 Oak Ave Apt 3B", "metadata": {"tenant": "Jane Doe", "security_deposit": 2400.00, "lease_end": "2027-01-01", "term_months": 12, "utilities_included": ["water", "trash"], "pet_deposit": null, "late_fee": 50.00}}""",
 }
 
 EXTRACTION_TEXT_PROMPTS = {
@@ -175,6 +201,37 @@ Respond in JSON:
 }
 
 Only extract what's clearly present. Use null for missing fields.""",
+
+    "payslip": """Extract payslip information from this text.
+
+Respond in JSON:
+{
+  "merchant": "Employer name or null",
+  "total_amount": net pay as numeric or null,
+  "date": "YYYY-MM-DD or null",
+  "metadata": {
+    "earnings": {"regular": amount, "overtime": amount, "bonus": amount, "commission": amount, "tips": amount, "pto_payout": amount, "reimbursement": amount, "other": [{"label": "...", "amount": amount}]},
+    "deductions": {"federal_tax": amount, "state_tax": amount, "local_tax": amount, "social_security": amount, "medicare": amount, "retirement_401k": amount, "roth_401k": amount, "health_insurance": amount, "dental_insurance": amount, "vision_insurance": amount, "hsa": amount, "fsa": amount, "life_insurance": amount, "disability_insurance": amount, "union_dues": amount, "garnishments": amount, "other": [{"label": "...", "amount": amount}]},
+    "pay_period_start": "YYYY-MM-DD or null",
+    "pay_period_end": "YYYY-MM-DD or null",
+    "ytd_gross": numeric or null,
+    "ytd_net": numeric or null
+  }
+}
+
+Map each earnings/deduction line to the closest canonical key. If no key fits, add to "other". Use null for absent fields.""",
+
+    "rental_agreement": """Extract rental agreement information from this text.
+
+Respond in JSON:
+{
+  "merchant": "Landlord or property management name or null",
+  "total_amount": monthly rent as numeric or null,
+  "date": "YYYY-MM-DD lease start or null",
+  "metadata": {"tenant": "name or null", "security_deposit": numeric or null, "lease_end": "YYYY-MM-DD or null", "term_months": integer or null}
+}
+
+Only extract what's clearly present. Use null for missing fields.""",
 }
 
 
@@ -188,6 +245,9 @@ async def extract_document_fields(image_bytes: bytes, doc_type: str) -> Dict[str
     deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1")
 
     base64_image = encode_image(image_bytes)
+
+    token_limits = {"payslip": 800}
+    max_tokens = token_limits.get(doc_type, 500)
 
     response = await client.chat.completions.create(
         model=deployment,
@@ -210,7 +270,7 @@ async def extract_document_fields(image_bytes: bytes, doc_type: str) -> Dict[str
                 ]
             }
         ],
-        max_tokens=500,
+        max_tokens=max_tokens,
         temperature=0.1,
         response_format={"type": "json_object"},
     )

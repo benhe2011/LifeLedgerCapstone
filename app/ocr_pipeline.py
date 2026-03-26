@@ -65,6 +65,24 @@ def classify_doc_type(ocr_text: str) -> str:
     """Classify document type based on OCR text using heuristics."""
     text_lower = ocr_text.lower()
 
+    # Payslip indicators (check first - payslips contain "total", "tax", "monthly")
+    if any(kw in text_lower for kw in [
+        "pay stub", "payslip", "pay slip", "gross pay", "net pay",
+        "earnings statement", "ytd", "year to date", "pay period",
+        "federal tax", "fica", "withholding", "hourly rate",
+        "earnings", "deductions"
+    ]) and any(kw in text_lower for kw in ["employer", "employee", "pay period", "pay date", "gross", "net"]):
+        return "payslip"
+
+    # Rental agreement indicators (before invoice/subscription - leases contain "amount due", "monthly", "billing")
+    if any(kw in text_lower for kw in [
+        "lease agreement", "rental agreement", "tenant", "landlord",
+        "lessee", "lessor", "rent amount", "security deposit",
+        "lease term", "occupancy", "eviction", "tenancy", "premises",
+        "lease", "rental property", "rent due",
+    ]):
+        return "rental_agreement"
+
     # Invoice indicators (check before receipt - invoices often contain "total" too)
     if any(kw in text_lower for kw in ["invoice", "bill to", "remit to", "amount due", "purchase order"]):
         return "invoice"
@@ -155,7 +173,7 @@ async def run_ocr_pipeline(image_bytes: bytes) -> Dict[str, Any]:
 
     # Extract structured fields for classified documents
     extraction = None
-    if doc_type in ("receipt", "subscription", "invoice"):
+    if doc_type in ("receipt", "subscription", "invoice", "payslip", "rental_agreement"):
         try:
             extraction = await extract_document_fields(image_bytes, doc_type)
         except Exception as e:
