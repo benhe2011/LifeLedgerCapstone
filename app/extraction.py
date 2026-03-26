@@ -80,9 +80,9 @@ async def get_extractions_by_doc(db, doc_id: int) -> Dict[str, Any] | None:
 
 
 
-# Document types that represent income or reference documents, not expenses.
+# Document types that represent income, not expenses.
 # Excluded from spending aggregation queries.
-_INCOME_DOC_TYPES = ('payslip', 'rental_agreement')
+_INCOME_DOC_TYPES = ('payslip',)
 
 
 async def get_total_spending(db, user_id: str, start_date: str = None, end_date: str = None, doc_type: str = None) -> dict:
@@ -428,10 +428,19 @@ async def detect_trips(db, user_id: str, proximity_days: int = 3) -> List[dict]:
 
 # --- Income / Payslip / Rental Agreement Functions ---
 
+def _num(v):
+    """Safely convert a value to float, returning 0 on failure."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0
+
+
 async def get_earnings_summary(db, user_id: str, start_date: str = None, end_date: str = None, limit: int = 50) -> list:
     """Get earnings summary from payslips over time."""
     sql = """
-        SELECT e.merchant, e.date, e.total_amount, e.metadata,
+        SELECT e.merchant, e.date, e.total_amount,
+               e.metadata->'earnings' as earnings,
                d.id as doc_id
         FROM extractions e
         JOIN documents d ON e.doc_id = d.id
@@ -444,10 +453,9 @@ async def get_earnings_summary(db, user_id: str, start_date: str = None, end_dat
     rows = await db.fetch(sql, user_id, parse_date(start_date), parse_date(end_date), limit)
     results = []
     for r in rows:
-        meta = _json.loads(r["metadata"]) if r["metadata"] else {}
-        earnings = meta.get("earnings", {})
-        gross = sum(v for k, v in earnings.items() if k != "other" and v) + \
-                sum(item["amount"] for item in earnings.get("other", []) if item.get("amount"))
+        earnings = r["earnings"] or {}
+        gross = sum(_num(v) for k, v in earnings.items() if k != "other" and v) + \
+                sum(_num(item.get("amount")) for item in earnings.get("other", []) if item.get("amount"))
         results.append({
             "employer": r["merchant"],
             "date": r["date"].isoformat() if r["date"] else None,
@@ -461,7 +469,7 @@ async def get_earnings_summary(db, user_id: str, start_date: str = None, end_dat
 async def get_deductions_breakdown(db, user_id: str, start_date: str = None, end_date: str = None) -> dict:
     """Aggregate payslip deductions across a date range."""
     sql = """
-        SELECT e.metadata
+        SELECT e.metadata->'deductions' as deductions
         FROM extractions e
         JOIN documents d ON e.doc_id = d.id
         WHERE d.user_id = $1 AND e.doc_type = 'payslip'
@@ -473,15 +481,14 @@ async def get_deductions_breakdown(db, user_id: str, start_date: str = None, end
     totals = defaultdict(float)
     other_totals = defaultdict(float)
     for r in rows:
-        meta = _json.loads(r["metadata"]) if r["metadata"] else {}
-        deductions = meta.get("deductions", {})
+        deductions = r["deductions"] or {}
         for key, val in deductions.items():
             if key == "other":
                 for item in (val or []):
                     if item.get("amount"):
-                        other_totals[item["label"]] += item["amount"]
+                        other_totals[item["label"]] += _num(item["amount"])
             elif val:
-                totals[key] += val
+                totals[key] += _num(val)
 
     return {
         "canonical": {k: round(v, 2) for k, v in totals.items()},
@@ -538,7 +545,14 @@ async def get_income_vs_spending(db, user_id: str, start_date: str = None, end_d
 async def get_lease_details(db, user_id: str) -> list:
     """Get rental agreement details for the user."""
     sql = """
-        SELECT e.merchant, e.date, e.total_amount, e.address, e.metadata,
+        SELECT e.merchant, e.date, e.total_amount, e.address,
+               e.metadata->>'tenant' as tenant,
+               (e.metadata->>'security_deposit')::numeric as security_deposit,
+               e.metadata->>'lease_end' as lease_end,
+               (e.metadata->>'term_months')::int as term_months,
+               e.metadata->'utilities_included' as utilities_included,
+               (e.metadata->>'pet_deposit')::numeric as pet_deposit,
+               (e.metadata->>'late_fee')::numeric as late_fee,
                d.id as doc_id
         FROM extractions e
         JOIN documents d ON e.doc_id = d.id
@@ -548,16 +562,18 @@ async def get_lease_details(db, user_id: str) -> list:
     rows = await db.fetch(sql, user_id)
     results = []
     for r in rows:
-        meta = _json.loads(r["metadata"]) if r["metadata"] else {}
         results.append({
             "landlord": r["merchant"],
             "lease_start": r["date"].isoformat() if r["date"] else None,
             "monthly_rent": float(r["total_amount"]) if r["total_amount"] else None,
             "property_address": r["address"],
-            "tenant": meta.get("tenant"),
-            "security_deposit": meta.get("security_deposit"),
-            "lease_end": meta.get("lease_end"),
-            "term_months": meta.get("term_months"),
+            "tenant": r["tenant"],
+            "security_deposit": float(r["security_deposit"]) if r["security_deposit"] else None,
+            "lease_end": r["lease_end"],
+            "term_months": r["term_months"],
+            "utilities_included": r["utilities_included"],
+            "pet_deposit": float(r["pet_deposit"]) if r["pet_deposit"] else None,
+            "late_fee": float(r["late_fee"]) if r["late_fee"] else None,
             "doc_id": r["doc_id"],
         })
     return results
