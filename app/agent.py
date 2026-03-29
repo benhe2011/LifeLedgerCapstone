@@ -330,12 +330,13 @@ TOOLS = [
     "function": {
         "name": "web_search",
         "description": (
-            "LAST RESORT ONLY: Search the web for real-time prices, alternatives, or general information. "
-            "You MUST first attempt to answer the question using the other available document tools. "
-            "Only call this tool if those tools returned no relevant results OR the question explicitly "
-            "requires current external data that cannot exist in the user's uploaded documents "
-            "(e.g., today's market price, a store's current hours). "
-            "Do NOT call this tool speculatively or as a first step."
+            "LAST RESORT ONLY — almost never needed. Search the web for external information. "
+            "RULES: (1) You MUST call at least one local document tool FIRST and review its results. "
+            "(2) Only call web_search if the user explicitly requests a web search, OR if local tools "
+            "returned ZERO relevant results and the question cannot be answered from the user's uploads. "
+            "(3) Questions about the user's own documents, spending, receipts, or any topic they may "
+            "have uploaded images about should NEVER trigger web_search — the answer is in their uploads. "
+            "(4) Do NOT call this tool speculatively, as a first step, or to 'supplement' a local answer."
         ),
         "parameters": {
             "type": "object",
@@ -404,11 +405,13 @@ CRITICAL — Tax ambiguity:
 - If ambiguous, prefer payslip deductions and mention that sales tax from receipts is a separate query.
 
 When answering questions:
-1. TOOL PRIORITY — Always follow this order:
-   a. First, use the available local document tools to look up information from the user's own records.
-   b. Only call web_search if the local document tools returned no useful results AND the question
-      genuinely requires real-time external data that cannot exist in the user's uploaded files.
-   c. NEVER call web_search as a first step or before attempting local document tools.
+1. TOOL PRIORITY — The vast majority of questions can be fully answered with local document tools alone.
+   a. ALWAYS start with local document tools to look up information from the user's own records.
+   b. Only call web_search if ALL of these are true: (i) you already called a local tool, (ii) it returned
+      no useful results, AND (iii) the question cannot be answered from the user's uploads.
+   c. NEVER call web_search as a first step, before attempting local tools, or to supplement an already
+      sufficient local answer. If local tools answered the question, do NOT also web search.
+   d. Exception: if the user explicitly asks to search the web, you may call web_search directly.
 2. Use multiple tools if needed — if your first retrieval returns no results or partial results,
    try a broader tool before concluding. Do not give up after a single failed attempt.
 3. Analyze the results and provide a clear, helpful answer
