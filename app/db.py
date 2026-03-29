@@ -245,7 +245,7 @@ async def search_documents(
     user_id: str,
     query: str,
     limit: int = 10,
-    min_similarity: float = 0.3,
+    min_similarity: float = float(os.getenv("MIN_SIMILARITY_THRESHOLD", "0.45")),
 ) -> List[Dict[str, Any]]:
     """Search documents using semantic similarity.
 
