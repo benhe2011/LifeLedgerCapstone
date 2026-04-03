@@ -454,6 +454,10 @@ async def get_earnings_summary(db, user_id: str, start_date: str = None, end_dat
     results = []
     for r in rows:
         earnings = r["earnings"] or {}
+        if isinstance(earnings, str):
+            try: earnings = _json.loads(earnings)
+            except (ValueError, TypeError): earnings = {}
+        if not isinstance(earnings, dict): earnings = {}
         gross = sum(_num(v) for k, v in earnings.items() if k != "other" and v) + \
                 sum(_num(item.get("amount")) for item in earnings.get("other", []) if item.get("amount"))
         results.append({
@@ -482,6 +486,10 @@ async def get_deductions_breakdown(db, user_id: str, start_date: str = None, end
     other_totals = defaultdict(float)
     for r in rows:
         deductions = r["deductions"] or {}
+        if isinstance(deductions, str):
+            try: deductions = _json.loads(deductions)
+            except (ValueError, TypeError): deductions = {}
+        if not isinstance(deductions, dict): deductions = {}
         for key, val in deductions.items():
             if key == "other":
                 for item in (val or []):
