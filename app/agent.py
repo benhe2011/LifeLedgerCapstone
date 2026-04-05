@@ -356,7 +356,7 @@ TOOL_BUCKETS = {
                "get_all_receipt_texts", "get_lease_details", "web_search"],
     "income": ["get_earnings_summary", "get_deductions_breakdown", "get_income_vs_spending",
                "get_recurring_income", "web_search"],
-    "travel": ["get_trips", "web_search"],
+    "travel": ["get_trips", "search_documents", "web_search"],
 }
 
 REROUTE_TOOL = {
