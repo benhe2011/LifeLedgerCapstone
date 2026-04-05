@@ -93,7 +93,8 @@ def classify_doc_type(ocr_text: str) -> str:
         return "subscription"
 
     # Receipt indicators
-    if any(kw in text_lower for kw in ["total", "subtotal", "tax", "cash", "visa", "mastercard", "payment"]):
+    if any(kw in text_lower for kw in ["total", "subtotal", "tax", "cash", "visa", "mastercard", "payment",
+                                        "boarding pass", "flight", "itinerary", "hotel", "reservation"]):
         return "receipt"
 
     # Warranty indicators

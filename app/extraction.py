@@ -92,6 +92,7 @@ async def get_total_spending(db, user_id: str, start_date: str = None, end_date:
         FROM extractions e
         JOIN documents d ON e.doc_id = d.id
         WHERE d.user_id = $1
+          AND e.total_amount IS NOT NULL AND e.total_amount > 0
           AND ($2::date IS NULL OR COALESCE(e.date, d.created_at::date) >= $2::date)
           AND ($3::date IS NULL OR COALESCE(e.date, d.created_at::date) <= $3::date)
           AND ($4::text IS NULL OR e.doc_type = $4::text)
@@ -109,6 +110,7 @@ async def get_spending_by_merchant(db, user_id: str, start_date: str = None, end
         FROM extractions e
         JOIN documents d ON e.doc_id = d.id
         WHERE d.user_id = $1 AND e.merchant IS NOT NULL
+          AND e.total_amount IS NOT NULL AND e.total_amount > 0
           AND ($2::date IS NULL OR COALESCE(e.date, d.created_at::date) >= $2::date)
           AND ($3::date IS NULL OR COALESCE(e.date, d.created_at::date) <= $3::date)
           AND ($5::text IS NULL OR e.doc_type = $5::text)
