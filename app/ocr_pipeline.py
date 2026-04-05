@@ -78,8 +78,8 @@ def classify_doc_type(ocr_text: str) -> str:
     if any(kw in text_lower for kw in [
         "lease agreement", "rental agreement", "tenant", "landlord",
         "lessee", "lessor", "rent amount", "security deposit",
-        "lease term", "occupancy", "eviction", "tenancy", "premises",
-        "lease", "rental property", "rent due",
+        "lease term", "eviction", "tenancy",
+        "rental property", "rent due",
     ]):
         return "rental_agreement"
 
