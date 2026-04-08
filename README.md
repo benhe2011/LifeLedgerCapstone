@@ -6,7 +6,7 @@ Backend API for LifeLedger - document OCR, semantic search, spending analytics, 
 
 - Production API: https://llapi.click
 - Health Check: https://llapi.click/health
-- EC2 Instance: 18.236.74.130 (internal, behind ALB)
+- EC2 Instance: 54.214.55.52 (internal, behind ALB)
 
 ## Architecture
 
@@ -24,7 +24,7 @@ Components:
 
 ```bash
 # SSH into EC2
-ssh -i LLKey.pem ubuntu@18.236.74.130
+ssh -i LLKey.pem ubuntu@54.214.55.52
 
 # Pull and rebuild
 cd LifeLedgerCapstone
