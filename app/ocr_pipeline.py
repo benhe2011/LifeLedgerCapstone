@@ -89,7 +89,7 @@ def classify_doc_type(ocr_text: str) -> str:
 
     # Subscription indicators (check before receipt - subscriptions often contain "total" too)
     if any(kw in text_lower for kw in ["renew", "subscription", "billing", "monthly", "annual",
-                                        "per month", "per year", "recurring", "autopay"]):
+                                        "per month", "per year", "recurring", "autopay", "plan"]):
         return "subscription"
 
     # Receipt indicators
